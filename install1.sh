@@ -43,8 +43,8 @@ cat > studio.sh <<'EOF'
 am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity && \
 termux-x11 -xstartup "bash -c 'fluxbox & thunar & /Apps/IDE/android-studio/bin/studio.sh && sleep infinity'"
 EOF
-aria2c -o startstudio.sh https://raw.githubusercontent.com/AnBui2004/termux/refs/heads/main/ide/androidstudio/startstudio.sh
-aria2c -o uninstall.sh https://raw.githubusercontent.com/AnBui2004/termux/refs/heads/main/ide/androidstudio/uninstall.sh
+aria2c -o startstudio.sh https://raw.githubusercontent.com/HanLuxury/HanLuxury/refs/heads/main/startstudio.sh
+aria2c -o uninstall.sh https://raw.githubusercontent.com/HanLuxury/HanLuxury/refs/heads/main/uninstall.sh
 chmod +x bin/studio
 chmod +x bin/studio.sh
 chmod +x studio.sh
@@ -54,7 +54,7 @@ clear
 echo -e '\e[1;37m[i] Just a sec...\e[0m'
 mkdir -p $PREFIX/var/lib/proot-distro/installed-rootfs/debian/home/devroom
 cd $PREFIX/var/lib/proot-distro/installed-rootfs/debian/etc/profile.d
-aria2c -o installstudio.sh https://raw.githubusercontent.com/AnBui2004/termux/refs/heads/main/ide/androidstudio/install2.sh
+aria2c -o installstudio.sh https://raw.githubusercontent.com/HanLuxury/HanLuxury/refs/heads/main/install2.sh
 chmod +x installstudio.sh
 cd $PREFIX/var/lib/proot-distro/installed-rootfs/debian/root
 echo "sed -i \"/startstudio.sh/d\" /home/devroom/.profile" > "studio.sh"
