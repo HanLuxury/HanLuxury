@@ -54,7 +54,7 @@ bool ParseInt(const std::string& text, int& out) {
 
 // ---------------------------------------------------------------- IniFile
 
-bool IniFile::Load(const char* path) {
+bool IniFile::Load(const char* path, bool merge) {
     FILE* f = path ? std::fopen(path, "rb") : nullptr;
     if (!f) return false;
     std::string text;
@@ -65,11 +65,23 @@ bool IniFile::Load(const char* path) {
         if (text.size() > 256 * 1024) break; // a config file never needs more
     }
     std::fclose(f);
-    return LoadFromString(text);
+    return LoadFromString(text, merge);
 }
 
-bool IniFile::LoadFromString(const std::string& text) {
-    m_values.clear();
+std::string IniFile::NormalizeKey(const std::string& key) {
+    // SDX type prefix: "bEnabled" -> "enabled", "ucAlpha" -> "alpha"; "cascades" stays.
+    size_t prefix = 0;
+    if (key.size() > 2 && key[0] == 'u' && key[1] == 'c' && std::isupper(static_cast<unsigned char>(key[2]))) {
+        prefix = 2;
+    } else if (key.size() > 1 && std::strchr("ibfsc", key[0]) &&
+               (std::isupper(static_cast<unsigned char>(key[1])) || std::isdigit(static_cast<unsigned char>(key[1])))) {
+        prefix = 1;
+    }
+    return Lower(key.substr(prefix));
+}
+
+bool IniFile::LoadFromString(const std::string& text, bool merge) {
+    if (!merge) m_values.clear();
     std::string section;
     size_t pos = 0;
     int lineNo = 0;
@@ -80,30 +92,36 @@ bool IniFile::LoadFromString(const std::string& text) {
         pos = end + 1;
         ++lineNo;
 
-        // Strip comments (';' or '#') and a UTF-8 BOM on the first line.
+        // Strip a UTF-8 BOM on the first line, then comments ('#', ';', '//').
         if (lineNo == 1 && line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
             static_cast<unsigned char>(line[1]) == 0xBB && static_cast<unsigned char>(line[2]) == 0xBF)
             line.erase(0, 3);
         const size_t comment = line.find_first_of(";#");
         if (comment != std::string::npos) line.erase(comment);
+        const size_t slashes = line.find("//");
+        if (slashes != std::string::npos) line.erase(slashes);
         line = Trim(line);
         if (line.empty()) continue;
 
         if (line.front() == '[') {
-            const size_t close = line.find(']');
+            // "[[Group]" opens and "[Group]]" closes a group of sections: no effect on keys.
+            if (line.size() >= 3 && line[line.size() - 1] == ']' && line[line.size() - 2] == ']') continue;
+            size_t open = 0;
+            while (open < line.size() && line[open] == '[') ++open;
+            const size_t close = line.find(']', open);
             if (close == std::string::npos) {
                 GFX_LOGW(kTag, "line %d: missing ']'", lineNo);
                 continue;
             }
-            section = Lower(Trim(line.substr(1, close - 1)));
+            section = Lower(Trim(line.substr(open, close - open)));
             continue;
         }
         const size_t eq = line.find('=');
         if (eq == std::string::npos) {
-            GFX_LOGW(kTag, "line %d: expected key=value", lineNo);
+            GFX_LOGW(kTag, "line %d: expected key = value", lineNo);
             continue;
         }
-        const std::string key = Lower(Trim(line.substr(0, eq)));
+        const std::string key = NormalizeKey(Trim(line.substr(0, eq)));
         const std::string value = Trim(line.substr(eq + 1));
         if (key.empty()) continue;
         m_values[section + "." + key] = value;
@@ -349,17 +367,27 @@ void GraphicsConfig::ApplyIni(const IniFile& ini) {
     Validate();
 }
 
-bool GraphicsConfig::Load(const char* path) {
+bool GraphicsConfig::Load(const char* configPath, const char* advancedPath, const char* legacyPath) {
     *this = GraphicsConfig{};
     ApplyQualityPreset(GraphicsQuality::High);
     IniFile ini;
-    if (!ini.Load(path)) {
+    const bool main = ini.Load(configPath);
+    const bool advanced = ini.Load(advancedPath, true);
+    bool legacy = false;
+    if (!main && !advanced) legacy = ini.Load(legacyPath);
+    if (!main && !advanced && !legacy) {
         Validate();
-        GFX_LOGW(kTag, "%s not found, using built-in HIGH defaults", path ? path : "(null)");
+        GFX_LOGW(kTag, "%s not found, using built-in HIGH defaults", configPath ? configPath : "(null)");
         return false;
     }
     ApplyIni(ini);
-    GFX_LOGI(kTag, "loaded %s (%zu keys)", path, ini.Size());
+    if (legacy) {
+        GFX_LOGW(kTag, "loaded the old %s (%zu keys): move to Config.ini + Advanced.ini", legacyPath, ini.Size());
+    } else {
+        GFX_LOGI(kTag, "loaded %s%s%s (%zu keys)", main ? "Config.ini" : "", main && advanced ? " + " : "",
+                 advanced ? "Advanced.ini" : "", ini.Size());
+        if (!main) GFX_LOGW(kTag, "%s missing, Advanced.ini on top of the defaults", configPath);
+    }
     return true;
 }
 

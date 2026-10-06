@@ -12,8 +12,12 @@
 
 // The receiver registry reads ES2Shader::fullProgram through a raw offset;
 // keep it locked to the project's struct (which mirrors the libGTASA DWARF).
+// ES2Shader has a vtable (not standard-layout); clang computes offsetof for it.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Winvalid-offsetof"
 static_assert(offsetof(ES2Shader, fullProgram) == gfx::ShaderPatcher::kEs2ShaderProgramOffset,
               "ES2Shader::fullProgram offset changed");
+#pragma clang diagnostic pop
 
 namespace gfx::GraphicsHooks {
 namespace {

@@ -6,9 +6,15 @@
 // look never switches abruptly. Weather (rain, clouds, fog) is applied on top.
 // The sun DIRECTION is not decided here: it always comes from GTA's timecycle
 // (CTimeCycle::m_VectorToSun) so shadows match the visible sun corona.
+//
+// The four looks and the ramp hours can be edited in
+// TESTLIT/graphics/data/eagle_timecyc.dat (one row per period, see that file);
+// rows that are missing keep the built-in values.
 
 #include "GameRenderBridge.h"
 #include "Math/Vector3.h"
+
+#include <string>
 
 namespace gfx {
 
@@ -44,8 +50,16 @@ public:
 
     LookProfile& Profile(int index) { return m_profiles[index]; } // 0 sunrise, 1 day, 2 sunset, 3 night
 
+    // Built-in looks, then every valid row of the file. Returns false if the file is missing.
+    bool LoadProfiles(const char* path);
+    // Host-testable parser. Returns the number of rows applied; 'error' lists rejected lines.
+    int ParseProfiles(const std::string& text, std::string& error);
+    void ResetProfiles();
+    const float* Ramps() const { return m_ramps; }
+
 private:
     LookProfile m_profiles[4];
+    float m_ramps[4] = {5.0f, 7.0f, 16.0f, 19.0f}; // night->sunrise, sunrise->day, day->sunset, sunset->night
 };
 
 } // namespace gfx

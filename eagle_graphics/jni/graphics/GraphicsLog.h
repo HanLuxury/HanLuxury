@@ -1,6 +1,6 @@
 #pragma once
 // EAGLE graphics engine - logging to logcat (tag "EagleGFX") and to
-// /storage/emulated/0/TESTLIT/graphics/graphics.log.
+// /storage/emulated/0/TESTLIT/graphics/logOutput.log.
 //
 // Thread-safe: used from the game thread, the RenderQueue (GL) thread and JNI.
 // Never throws, never aborts. If the file cannot be opened only logcat is used.

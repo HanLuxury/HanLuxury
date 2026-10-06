@@ -23,7 +23,8 @@ bool EnsureGpu() {
     }
     if (!g_program) {
         static const AttribBinding bindings[] = {{0, "aPosition"}};
-        g_program = sm.GetProgram("debug_shadowmap", "debug_quad.vert", "debug_shadowmap.frag", bindings, 1);
+        g_program = sm.GetProgram("debug_shadowmap", "Debug/ShadowMap.shader:vert", "Debug/ShadowMap.shader:frag",
+                                  bindings, 1);
         if (!g_program) return false;
         g_locRect = glGetUniformLocation(g_program, "uRect");
         g_locTex = glGetUniformLocation(g_program, "uDepth");

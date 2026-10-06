@@ -2,7 +2,8 @@
 
 Engine grafis native (C++/JNI) di dalam `libmultiplayer.so`. **Tanpa AML**: hook memakai
 ShadowHook (framework yang sudah dipakai `CHook`), resource eksternal dari
-`/storage/emulated/0/TESTLIT/graphics/`.
+`/storage/emulated/0/TESTLIT/graphics/` dengan susunan berkas bergaya SA_DOX
+(`Config.ini`, `Advanced.ini`, `shaderUniform.ini`, `glShader/`, `data/`, `logOutput.log`, lihat §5).
 
 Fase yang dikerjakan di paket ini: **PHASE 1–5** (fondasi, matahari, CSM, caster
 gedung/objek/ped/kendaraan/vegetasi, receiver di shader world). Post‑process (PHASE 6+)
@@ -14,7 +15,12 @@ belum: lihat bagian akhir.
 
 | Status | Bagian |
 |---|---|
-| [IMPLEMENTED] | Log (`graphics.log`), parser `graphics.ini`, preset LOW/MEDIUM/HIGH/ULTRA, deteksi GPU, GL state backup |
+| [IMPLEMENTED] | Log (`logOutput.log`), parser `Config.ini` + `Advanced.ini` (format SDX: `bEnabled = 1`, `[[Grup]`), preset LOW/MEDIUM/HIGH/ULTRA, deteksi GPU, GL state backup |
+| [IMPLEMENTED] | `glShader/*.shader` (format `<vert>`/`<frag>`, `#include "x";`, parameter `@float/@int/@bool`), salinan bawaan di library bila file hilang/rusak |
+| [IMPLEMENTED] | `shaderUniform.ini`: nilai shader yang berubah LANGSUNG tanpa restart (uniform `SG_User[8]`), disimpan kembali dari tab Grafis |
+| [IMPLEMENTED] | Receiver per entitas: `Entity/Building.shader`, `Vehicle.shader`, `Character.shader` (klasifikasi: skinning → Character, lit+specular → Vehicle, sisanya → Building) |
+| [IMPLEMENTED] | `data/eagle_timecyc.dat`: 4 tampilan waktu + jam transisi bisa diedit |
+| [IMPLEMENTED] | Java: tab **Grafis** di `DialogClientSettings` (aktif, bayangan, kualitas, jarak, debug, menu shader uniform), pilihan pemain disimpan & diterapkan lagi saat start |
 | [IMPLEMENTED] | Bridge RenderQueue (command slot 47 + observer `rqSelectShader`), divalidasi terhadap symbol sebelum patch |
 | [IMPLEMENTED] | SunManager: arah dari `CTimeCycle` GTA, clamp elevasi, dead‑zone anti‑shimmer, fade horizon/cuaca/interior |
 | [IMPLEMENTED] | TimeCycleFX: SUNRISE/DAY/SUNSET/NIGHT + hujan/awan/kabut, cross‑fade halus |
@@ -22,6 +28,7 @@ belum: lihat bagian akhir.
 | [IMPLEMENTED] | Caster: daftar visible GTA + scan sektor dunia di sekitar kamera; gedung, dummy, objek SA‑MP, kendaraan (+sopir), ped (animasi asli), senjata, daun ber‑alpha |
 | [IMPLEMENTED] | Receiver: injeksi ke shader world native GTA (`ES2Shader::Build`), PCF 1/4/9 tap, hardware compare bila ada `GL_EXT_shadow_samplers`, normal offset, blend cascade, fade jarak |
 | [IMPLEMENTED] | Debug: `showCascade`, `showShadowMap`, `showSunDirection`, `freezeSun`, `freezeShadowCamera`, `perfCounters` |
+| [IMPLEMENTED] | Blob shadow GTA hanya disembunyikan bila bayangan matahari ≥ 0.25 (hujan/mendung: blob tetap, mobil/ped tidak "melayang") |
 | [IMPLEMENTED] | Adaptive quality (hysteresis 4 s turun / 12 s naik), JNI kontrol, hot‑reload config & shader engine |
 | [IMPLEMENTED] | Failsafe: shader patch gagal → shader asli GTA; FBO gagal → pass dibuang (rasterizer discard); context berganti → resource dibuat ulang |
 | [NEEDS BINDING] | Tidak ada. Semua symbol yang dipakai diekspor libGTASA 2.10 arm64 (dicek dengan `llvm-nm -D`) |
@@ -116,7 +123,7 @@ cascade dengan bounding sphere vs light box; caster kecil dilewati di cascade ja
 cascade 0–1.
 
 ### E. Shadow receiver
-Kode di `world_shadow.glsl` disuntik ke semua shader 3D world (yang punya `Out_FogAmt` dan
+Kode receiver (`glShader/Entity/*.shader` + `realtimeShadow.shader`) disuntik ke semua shader 3D world (yang punya `Out_FogAmt` dan
 `ViewPos`; HUD/2D/sphere‑map tidak disentuh):
 `warna *= mix(1, tint, (1 − visibility) · strength · share)` + boost matahari kecil di area terang.
 `share` = porsi cahaya matahari: untuk shader GTA ber‑lighting dihitung dari suku directional
@@ -164,25 +171,27 @@ ShowRaster → eglSwapBuffers
 | File | Isi |
 |---|---|
 | `GraphicsEngine.h/.cpp` | singleton, alur frame, request thread‑safe, adaptive quality, perf log |
-| `GraphicsConfig.h/.cpp` | `IniFile` + `GraphicsConfig` + preset kualitas |
-| `GraphicsLog.h/.cpp` | logcat `EagleGFX` + `graphics.log` |
-| `GraphicsPaths.h` | path TESTLIT |
+| `GraphicsConfig.h/.cpp` | `IniFile` (format SDX) + `GraphicsConfig` (Config.ini → Advanced.ini) + preset kualitas |
+| `GraphicsLog.h/.cpp` | logcat `EagleGFX` + `logOutput.log` |
+| `GraphicsPaths.h` | semua path TESTLIT (susunan gaya SA_DOX) |
 | `GraphicsHooks.h/.cpp` | hook ShadowHook |
-| `GraphicsJNI.cpp` | JNI `com.holy.game.core.GraphicsNative` |
+| `GraphicsJNI.cpp` | JNI `com.holy.game.core.GraphicsNative` (19 fungsi) |
 | `GameRenderBridge.h/.cpp` | satu‑satunya akses ke kode/data GTA (dlsym + binding client) |
 | `RenderQueueBridge.h/.cpp` | command GL di thread RenderQueue |
 | `GLCaps.h/.cpp` | deteksi GPU |
 | `GLStateBackup.h/.cpp` | backup/restore state GL |
-| `ShaderManager.h/.cpp` | `LoadShaderFile/CompileShader/CreateProgram`, cache, reload |
-| `ShaderPatcher.h/.cpp` | injeksi receiver ke shader GTA + registry uniform |
-| `EmbeddedShaders.h` | salinan bawaan shader eksternal |
+| `GlShader.h/.cpp` | pembaca `.shader`: section `<vert>/<frag>`, `#include`, parameter `@` → `SG_User` + `SG_InitUser()` |
+| `ShaderUniforms.h/.cpp` | `shaderUniform.ini`: baca/simpan, slot, nilai live (thread‑safe) |
+| `ShaderManager.h/.cpp` | baca file (TESTLIT → bawaan), `CompileShader/CreateProgram`, cache, reload |
+| `ShaderPatcher.h/.cpp` | injeksi receiver per entitas ke shader GTA + registry uniform |
+| `EmbeddedGlShader.h` | **dibuat otomatis** oleh `tools/embed_glshader.py` dari `TESTLIT/graphics/glShader/` |
 | `FrameBuffer.h/.cpp` | atlas depth FBO + tekstur dummy |
 | `SunManager.h/.cpp` | `SunLight` |
-| `TimeCycleFX.h/.cpp` | profil waktu & cuaca |
+| `TimeCycleFX.h/.cpp` | profil waktu & cuaca (+ `data/eagle_timecyc.dat`) |
 | `CascadeShadow.h/.cpp` | `CalculateCascadeSplits`, `UpdateLightMatrices` |
 | `ShadowCasters.h/.cpp` | koleksi caster |
 | `ShadowManager.h/.cpp` | `RenderShadowCasters`, `UploadCascadeUniforms`, Begin/EndShadowPass (GL) |
-| `DebugOverlay.h/.cpp` | tampilan atlas |
+| `DebugOverlay.h/.cpp` | tampilan atlas (`glShader/Debug/ShadowMap.shader`) |
 | `Math/Vector3.h`, `Math/Matrix4.h/.cpp` | matematika (konvensi RW) |
 
 ### Diubah — `patches/existing_files.patch` (salinan lengkap juga di `jni/`)
@@ -194,19 +203,55 @@ ShowRaster → eglSwapBuffers
 * `CMakeLists.txt`: daftar eksplisit sumber engine (+`REMOVE_DUPLICATES`). `Android.mk`: komentar
   (auto‑scan sudah mengambil `graphics/`).
 
+### Java — `android/` (diff: `patches/java_files.patch`, susunan sama dengan `new_java.zip`)
+* Baru `java/com/holy/game/core/GraphicsNative.java` — deklarasi JNI + simpan/terapkan pilihan pemain
+  (SharedPreferences lewat `Storage`, kunci `eagle_gfx_*`).
+* Baru `java/com/holy/game/core/DialogClientSettingsGraphicsFragment.java` + `res/layout/dialog_settings_graphics.xml`
+  — tab **Grafis**: Grafis EAGLE, Bayangan matahari, Kualitas (LOW..ULTRA), Jarak bayangan (40–300 m),
+  debug cascade/shadow map, "Muat ulang Config.ini", status engine, dan baris **Shader Uniform** yang
+  dibuat dari `shaderUniform.ini` (geser = langsung terlihat, lepas = disimpan ke file).
+* `DialogClientSettings.java`: tab "Grafis" ditambahkan; tombol reset di tab Grafis memakai
+  `resetToConfigFile()` (TIDAK memanggil `onSettingsWindowDefaults`, yang menulis ulang settings.ini).
+* `Samp.kt`: `GraphicsNative.applySavedSettings()` tepat setelah `initSAMP(...)`, sebelum GTA membuat
+  shader, sehingga "bayangan aktif" dari pemain sudah ikut saat shader dunia dikompilasi.
+
 `graphics/postfx/*` dan `graphics/sun/*` (jalur lama berbasis AML) **tidak lagi dipanggil**;
 masih ikut terkompilasi tapi inert. Boleh dihapus setelah engine baru teruji.
 
-### Eksternal — salin `TESTLIT/graphics/` ke `/storage/emulated/0/TESTLIT/graphics/`
-* `graphics.ini` — semua parameter (komentar bahasa Indonesia).
-* `shaders/world_shadow.glsl` — kode receiver (boleh diedit; perlu restart game karena GTA
-  mengompilasi shader sekali). Komentar dibuang otomatis; jika file rusak → versi bawaan.
-* `shaders/debug_quad.vert`, `shaders/debug_shadowmap.frag` — overlay `showShadowMap`.
-* `textures/`, `lut/` — disiapkan untuk phase 6 (belum dibaca).
+### Eksternal — salin `TESTLIT/graphics/` ke `/storage/emulated/0/TESTLIT/graphics/` (gaya SA_DOX)
+```
+TESTLIT/graphics/
+├── Config.ini              pengaturan utama   ([Graphics] bEnabled/iQuality, [Shadow] ..., [Performance])
+├── Advanced.ini            pengaturan ahli    (bias, split, caster, [Sun], [Debug]) - menimpa Config.ini
+├── shaderUniform.ini       nilai shader LIVE  (class / tipe / nama / nilai / min / max / step)
+├── logOutput.log           dibuat engine
+├── glShader/
+│   ├── realtimeShadow.shader      cascade + PCF + SG_Shade (dipakai semua entitas)
+│   ├── Entity/Building.shader     SG_Apply untuk gedung/jalan/pohon/objek
+│   ├── Entity/Vehicle.shader      SG_Apply kendaraan (specular redup di bayangan)
+│   ├── Entity/Character.shader    SG_Apply ped (MinLight agar wajah terbaca)
+│   ├── Depth/Caster.shader        pass caster (alpha cutoff daun/pagar)
+│   ├── Debug/Cascade.shader       warna cascade (showCascade)
+│   └── Debug/ShadowMap.shader     <vert>+<frag> overlay atlas (showShadowMap)
+├── data/eagle_timecyc.dat  tampilan SUNRISE/DAY/SUNSET/NIGHT + RAMPS jam transisi
+└── textures/               disiapkan untuk PHASE 6 (belum dibaca)
+```
+Format `.shader`:
+* `<vert> … </vert>` / `<frag> … </frag>`; file tanpa tag = satu stage.
+* `#include "realtimeShadow.shader";` — dicari di folder file itu dulu, lalu dari `glShader/`;
+  tiap file hanya disertakan sekali.
+* `@float Nama < class = "Kelas", name = "Key", default = 1.0; min = 0; max = 2; step = 0.05; >`
+  (juga `@int`, `@bool`) — nilai diambil dari `shaderUniform.ini` dan bisa diubah saat game jalan.
+  Hanya untuk shader receiver (Entity/*), dipakai di dalam fungsi.
+* Mengubah isi `.shader` = restart game (GTA mengompilasi shader dunia sekali). File yang gagal
+  dibaca/melanggar kontrak (`SG_Apply`, `SG_SpecVis`, statement < 440 karakter) diganti salinan
+  bawaan dan dicatat di log. Jalankan `tests/run_host_tests.sh` di PC sebelum menyalin ke HP.
 
-Tidak ada `world.vert/frag` dan `shadow_depth*.vert/frag`: shader world adalah shader GTA yang
-di‑patch, dan caster dirender oleh shader GTA sendiri (wajib, karena skinning/format vertex GTA
-dan alpha test ada di sana). Alpha cutoff caster dikontrol `[shadow] alphaCutoff`.
+Beda dengan SA_DOX (disengaja, sesuai batasan proyek): tidak ada `data/script/*.x` (itu sistem
+skrip ala CLEO), tidak mengganti shader GTA secara utuh (receiver disuntik ke shader GTA asli,
+caster memakai shader GTA sendiri), tidak ada `.assets/` (menu ada di tab Grafis Java). Tidak ada
+kode/tekstur SA_DOX yang disalin; hanya susunan & format berkasnya yang diikuti.
+`graphics.ini` versi pertama masih dibaca bila `Config.ini` dan `Advanced.ini` tidak ada.
 
 ---
 
@@ -215,7 +260,10 @@ dan alpha test ada di sana). Alpha cutoff caster dikontrol `[shadow] alphaCutoff
    `patches/existing_files.patch` (`git apply` atau `patch -p1` dari folder yang berisi `jni/`),
    atau timpa 5 file dari `jni/`.
 2. `ndk-build` / CMake seperti biasa. Library tambahan: tidak ada (GLESv3, EGL, shadowhook sudah ada).
-3. (Opsional) tambahkan `docs/java/GraphicsNative.java` ke launcher untuk JNI.
+3. Java: salin isi `android/` ke project Java (atau `patches/java_files.patch`, path sama dengan
+   `new_java.zip`). Tanpa Java pun engine jalan dengan `Config.ini`.
+4. Setelah mengedit `TESTLIT/graphics/glShader/*.shader`: `python3 tools/embed_glshader.py`
+   (memperbarui salinan bawaan), lalu `tests/run_host_tests.sh` (butuh clang++ + glslangValidator).
 
 ---
 
@@ -229,22 +277,28 @@ dan alpha test ada di sana). Alpha cutoff caster dikontrol `[shadow] alphaCutoff
 
 Anti acne/peter‑panning: `depthBias` (meter) + `normalBias` (texel, searah normal) +
 `slopeBias/slopeUnits` (polygon offset saat caster). Anti shimmer: snapping texel + radius cascade
-dikuantisasi 5% + dead‑zone arah matahari (`[sun] updateThreshold`).
+dikuantisasi 5% + dead‑zone arah matahari (`[Sun] fUpdateThreshold` di Advanced.ini).
 
 ---
 
 ## 8. Uji target pertama (siang, player di jalan)
 1. Set jam game 12:00 dan cuaca cerah (mis. lewat `SetWorldTime`/`SetWeather` di server).
-2. `graphics.log` yang diharapkan (urutan):
+2. `logOutput.log` yang diharapkan (urutan):
    ```
    [Graphics] EAGLE GraphicsEngine starting ...
-   [Config] loaded .../graphics.ini (N keys)
+   [Config] loaded Config.ini + Advanced.ini (N keys)
+   [Uniform] loaded .../shaderUniform.ini (10 values)
+   [TimeCycleFX] loaded .../data/eagle_timecyc.dat (5 rows, ramps 5.0/7.0/16.0/19.0 h)
+   [Graphics] Loaded Shader - glShader/Entity/Building.shader [Entity/Building.shader (file), realtimeShadow.shader (file), ...] 4 params
+   [Graphics] Loaded Shader - glShader/Entity/Vehicle.shader [...] 5 params
+   [Graphics] Loaded Shader - glShader/Entity/Character.shader [...] 5 params
    [Bridge] GTA symbol bridge ready
    [Hooks] hooked _ZN9ES2Shader5BuildEPKcS1_
    [Hooks] hooked _ZN22CRealTimeShadowManager6UpdateEv
    [GLCaps] OpenGL ES version / GPU / GLSL / MaxTextureSize / DepthTexture support ...
    [ShaderPatch] receiver path: hardware|manual compare
-   [ShaderPatch] receiver #1: program ... lit=0 alpha=1 taps=9
+   [ShaderPatch] receiver #1 (Building #1): program ... lit=0 alpha=1 taps=9
+   [ShaderPatch] receiver #.. (Vehicle #1) / (Character #1): ...
    [RenderQueue] bridge installed: queue=... multiThread=1
    [Shadow] light camera created
    [FrameBuffer] depth FBO 4096x4096 D16 ...
@@ -252,22 +306,26 @@ dikuantisasi 5% + dead‑zone arah matahari (`[sun] updateThreshold`).
    [Graphics] first shadow frame: DAY hour=12.00 sun elev=~50 ...
    ```
 3. Debug cepat: `showShadowMap=1` (atlas kiri bawah: siluet gelap gedung/pohon/ped/mobil),
-   `showCascade=1` (merah/hijau/biru), `perfCounters=1` (ms CPU + jumlah caster).
+   `showCascade=1` (merah/hijau/biru), `perfCounters=1` (ms CPU + jumlah caster) — di `Advanced.ini`
+   atau langsung dari tab Grafis.
 4. Jika ada error compile shader: `[ShaderPatch] world.frag (patched): ...` di log, game tetap
    jalan dengan shader asli (tanpa bayangan pada material itu).
 5. Jika atlas terisi (overlay benar) tetapi dunia tidak menerima bayangan dan tidak ada baris
    `[ShaderPatch] receiver #...`: shader world di perangkat itu tidak memakai distance fog
-   (`Out_FogAmt`), yang dipakai sebagai penanda shader 3D. Kirim `graphics.log` + `debug log=1`
+   (`Out_FogAmt`), yang dipakai sebagai penanda shader 3D. Kirim `logOutput.log` + `[Debug] bLog = 1`
    agar kriteria di `ShaderPatcher::PatchSources` disesuaikan.
-6. Jika layar hitam/aneh setelah shadow pass: matikan `[shadow] enabled=0`, kirim `graphics.log`
+6. Jika layar hitam/aneh setelah shadow pass: matikan `[Shadow] bEnabled = 0`, kirim `logOutput.log`
    (urutan callback RQ tercatat), jangan ubah kode RenderQueue tanpa log.
 
-Diverifikasi di lingkungan pengembangan (bukan perangkat): 108 shader (native + varian patch)
-lolos `glslangValidator` GLSL ES 1.00 termasuk jalur `GL_EXT_shadow_samplers`, 48 pasangan VS/PS
-lolos link; uji unit matematika CSM (sudut frustum masuk light box & tile atlas, kedalaman 0..1,
-snapping texel < 0.05 texel, split 17.6/48.9/160 m); parser ini & preset; bobot waktu kontinu;
-semua file engine + file yang diubah lolos syntax‑check terhadap header project (target
-aarch64‑android, C++20).
+Diverifikasi di lingkungan pengembangan (bukan perangkat): `tests/run_host_tests.sh` membangun
+ketiga receiver dari `glShader/` (sama persis dengan salinan bawaan), menambal 6 contoh shader
+dunia GTA dalam 12 kombinasi (hardware/manual compare × 1/4/9 tap × blend), lalu 110 shader lolos
+`glslangValidator` GLSL ES 1.00/3.00 dan 48 pasangan VS/PS lolos link; uji parser `Config.ini`/
+`Advanced.ini` (format SDX), `shaderUniform.ini` (baca → set → simpan → baca), `eagle_timecyc.dat`;
+klasifikasi entitas (gedung/ped/kendaraan/pohon). Uji unit matematika CSM sebelumnya (split
+17.6/48.9/160 m, snapping texel). Semua file engine lolos syntax‑check aarch64‑android C++20 dengan
+`-Wall -Wextra`. Java: `javac` lolos dengan stub Android; 19 deklarasi `native` cocok dengan 19 fungsi
+JNI C++ (dicek dengan `javac -h`).
 
 ---
 
@@ -279,12 +337,24 @@ aarch64‑android, C++20).
 * Rumput prosedural (`CPlantMgr`) belum menjadi caster (mahal, noise).
 * Shader GTA yang dibuat sebelum engine aktif tidak dipatch (engine diinisialisasi di
   `JNI_OnLoad`, sebelum render thread GTA dibuat, jadi normalnya semua shader dipatch).
-* Mengubah `pcf`, `cascadeBlend`, `hardwarePcf`, `water`, `world_shadow.glsl` butuh restart game.
+* Mengubah `iPcf`, `bCascadeBlend`, `bHardwarePcf`, `bWater` dan isi `glShader/*.shader` butuh restart
+  game. Nilai `shaderUniform.ini` (Strength, Softness, SunBoost, ...) berubah langsung.
+* Klasifikasi entitas memakai teks shader GTA: objek dunia ber‑lighting dengan specular dianggap
+  Vehicle (jarang), objek skinned dianggap Character. Akibatnya hanya beda tampilan bayangan.
 * Lampu jalan/neon malam belum (phase 7: point light manager).
 
 ---
 
-## 10. Berikutnya
+## 10. Contoh gambar (simulasi)
+`docs/preview/*.jpg` dibuat dengan `docs/preview/simulasi.html` (three.js r128): kota contoh,
+arah matahari dari rumus GTA (`CalcColoursForPoint`), nilai `Config.ini`/`eagle_timecyc.dat`, dan
+rumus `SG_Shade` yang sama dengan `realtimeShadow.shader` diterapkan di atas warna "GTA" sebelum
+fog. **Ini simulasi di browser, bukan screenshot game** — hasil di perangkat tergantung model,
+tekstur dan timecyc GTA. Buka file HTML dengan `#shot=noon|sunset|night|rain|cascade&mode=eagle|gta`.
+
+---
+
+## 11. Berikutnya
 PHASE 6 (tonemap ACES + exposure + bloom quarter‑res) di batas `Render2dStuff` memakai
 `RenderQueueBridge` + `ShaderManager` + `GLStateBackup` yang sudah ada, lalu fog (7), wet road (8),
 SSAO (9), godray (10), optimasi (11).

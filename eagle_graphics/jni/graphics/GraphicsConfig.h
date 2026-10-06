@@ -1,9 +1,10 @@
 #pragma once
-// EAGLE graphics engine - configuration (graphics.ini) and quality presets.
+// EAGLE graphics engine - configuration (Config.ini + Advanced.ini) and quality presets.
 //
-// Load order: built-in defaults -> preset for [graphics] quality -> every key
-// that is present in graphics.ini overrides the preset. Unknown keys are
-// ignored, malformed values keep the previous value and are logged.
+// Load order: built-in defaults -> preset for [Graphics] Quality -> every key
+// present in Config.ini, then Advanced.ini, overrides the preset. Unknown keys
+// are ignored, malformed values keep the previous value and are logged.
+// Without Config.ini and Advanced.ini the first-release graphics.ini is read.
 
 #include <string>
 #include <unordered_map>
@@ -12,11 +13,18 @@ namespace gfx {
 
 enum class GraphicsQuality : int { Low = 0, Medium = 1, High = 2, Ultra = 3 };
 
-// Minimal INI reader: [section], key=value, ';' or '#' comments, case-insensitive keys.
+// INI reader in the SA_DOX/SDX style:
+//   [Section]            sections; "[[Group]" / "[Group]]" lines only group sections
+//   fDistance = 160.0    typed keys: b bool, i int, f float, s string, c colour, uc byte;
+//                        the type letter is dropped, so fDistance == distance
+//   # ; //               comment lines ('#' and ';' also end a value)
+// Section and key names are case-insensitive.
 class IniFile {
 public:
-    bool Load(const char* path);
-    bool LoadFromString(const std::string& text);
+    // merge = keep the keys already loaded (a later file overrides them).
+    bool Load(const char* path, bool merge = false);
+    bool LoadFromString(const std::string& text, bool merge = false);
+    static std::string NormalizeKey(const std::string& key);
 
     bool Has(const char* section, const char* key) const;
     bool GetBool(const char* section, const char* key, bool& out) const;
@@ -123,8 +131,9 @@ struct GraphicsConfig {
 
     void ApplyQualityPreset(GraphicsQuality q);
     void Validate();
-    // Returns false if the file is missing (defaults stay active).
-    bool Load(const char* path);
+    // Config.ini, then Advanced.ini on top; legacy graphics.ini only if both are missing.
+    // Returns false if no file was found (defaults stay active).
+    bool Load(const char* configPath, const char* advancedPath = nullptr, const char* legacyPath = nullptr);
     void ApplyIni(const IniFile& ini);
     void LogSummary() const;
 };

@@ -1,13 +1,15 @@
 #pragma once
 // EAGLE graphics engine - loading/compiling the engine's own GLSL programs.
 //
-// Sources are read from /storage/emulated/0/TESTLIT/graphics/shaders/<name>.
-// If a file is missing the embedded default (registered with RegisterEmbedded)
-// is used. Compile/link errors are written to graphics.log and the program is
-// reported as 0: the effect that needs it is disabled, the game continues.
+// Sources live in /storage/emulated/0/TESTLIT/graphics/glShader/ (SA_DOX-style
+// .shader files, see GlShader.h). A file that is missing there uses the copy
+// built into the library (EmbeddedGlShader.h). Compile/link errors are written
+// to logOutput.log and the program is reported as 0: the effect that needs it
+// is disabled, the game continues.
 //
 // GL functions (CompileShader/CreateProgram/GetProgram) must be called on the
-// GL thread. LoadShaderFile is plain file IO and thread-safe.
+// GL thread. ReadFile/LoadShaderFile are plain file IO and thread-safe once the
+// embedded copies are registered (EarlyInit).
 
 #include <GLES3/gl3.h>
 #include <string>
@@ -28,7 +30,10 @@ public:
     void SetBaseDir(const std::string& dir);
     void RegisterEmbedded(const std::string& name, const char* source);
 
-    // Reads <baseDir>/<name>; falls back to the embedded copy. 'fromFile' tells which one was used.
+    // Raw file <baseDir>/<path>, else the embedded copy. 'fromFile' tells which one was used.
+    bool ReadFile(const std::string& path, std::string& out, bool* fromFile = nullptr, bool embeddedOnly = false) const;
+    // "Debug/ShadowMap.shader:vert" -> that stage with #include expanded (GlShader).
+    // A name without ":stage" is read raw.
     bool LoadShaderFile(const std::string& name, std::string& out, bool* fromFile = nullptr) const;
 
     GLuint CompileShader(GLenum type, const std::string& source, const std::string& debugName);

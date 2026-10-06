@@ -58,6 +58,8 @@ set(EAGLE_GRAPHICS_SOURCES
         ${CMAKE_CURRENT_LIST_DIR}/graphics/GLCaps.cpp
         ${CMAKE_CURRENT_LIST_DIR}/graphics/GLStateBackup.cpp
         ${CMAKE_CURRENT_LIST_DIR}/graphics/ShaderManager.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/graphics/GlShader.cpp
+        ${CMAKE_CURRENT_LIST_DIR}/graphics/ShaderUniforms.cpp
         ${CMAKE_CURRENT_LIST_DIR}/graphics/ShaderPatcher.cpp
         ${CMAKE_CURRENT_LIST_DIR}/graphics/FrameBuffer.cpp
         ${CMAKE_CURRENT_LIST_DIR}/graphics/SunManager.cpp

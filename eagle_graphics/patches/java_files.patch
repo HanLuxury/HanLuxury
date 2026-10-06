@@ -1,0 +1,838 @@
+--- a/java/com/holy/game/core/DialogClientSettings.java
++++ b/java/com/holy/game/core/DialogClientSettings.java
+@@ -38,6 +38,7 @@
+         
+         final DialogClientSettingsAdapter adapter = new DialogClientSettingsAdapter(getChildFragmentManager(), 0);
+         adapter.addFragment("Основное", DialogClientSettingsCommonFragment.createInstance("common"));
++        adapter.addFragment("Grafis", DialogClientSettingsGraphicsFragment.createInstance("graphics"));
+ 
+         viewPager.setAdapter(adapter);
+         tabLayout.setupWithViewPager(viewPager);
+@@ -58,6 +59,15 @@
+         ((AppCompatButton)rootview.findViewById(R.id.dialog_settings_button_reset)).setOnClickListener(new View.OnClickListener() {
+             @Override
+             public void onClick(View view) {
++                // EAGLE graphics tab: Config.ini holds its defaults. onSettingsWindowDefaults()
++                // would rewrite the client's settings.ini, so it is not called for this tab.
++                Object current = adapter.getItem(tabLayout.getSelectedTabPosition());
++                if (current instanceof DialogClientSettingsGraphicsFragment) {
++                    ((DialogClientSettingsGraphicsFragment) current).resetToConfigFile();
++                    getDialog().dismiss();
++                    return;
++                }
++
+                 int defaultheight = Storage.getInt("defaultChatHeight");
+                 
+                 // FIX: Langsung simpan ke storage tanpa perlu update view layout secara langsung 
+--- a/java/com/holy/game/core/Samp.kt
++++ b/java/com/holy/game/core/Samp.kt
+@@ -102,6 +102,8 @@
+ 
+         initServer(host, port)
+         initSAMP(maxFps, filesDir.toString())
++        // EAGLE graphics engine: re-apply the player's "Grafis" settings before GTA builds its shaders.
++        GraphicsNative.applySavedSettings()
+         super.onCreate(bundle)
+         init()
+     }
+--- /dev/null
++++ b/java/com/holy/game/core/GraphicsNative.java
+@@ -0,0 +1,145 @@
++package com.holy.game.core;
++
++import android.util.Log;
++
++import com.holy.launcher.storage.Storage;
++
++/**
++ * EAGLE graphics engine - JNI control surface (native side: jni/graphics/GraphicsJNI.cpp).
++ *
++ * Every native call only records a request; the game thread applies it on the next
++ * frame, so all methods are safe on the UI thread. Rendering never runs in Java.
++ * Keep this class in package com.holy.game.core: the JNI symbol names depend on it.
++ *
++ * Config.ini + Advanced.ini (/storage/emulated/0/TESTLIT/graphics/) hold the defaults.
++ * Values the player changes in the "Grafis" settings tab are kept in SharedPreferences
++ * and applied again on every start by {@link #applySavedSettings()}. Live shader values
++ * (shaderUniform.ini) are written back to that file by {@link #nativeSaveShaderUniforms()}.
++ */
++public final class GraphicsNative {
++    private static final String TAG = "EagleGFX";
++
++    private static final String KEY_SAVED = "eagle_gfx_saved";
++    private static final String KEY_ENABLED = "eagle_gfx_enabled";
++    private static final String KEY_SHADOWS = "eagle_gfx_shadows";
++    private static final String KEY_QUALITY = "eagle_gfx_quality";
++    private static final String KEY_DISTANCE = "eagle_gfx_shadow_distance";
++
++    public static final int QUALITY_LOW = 0;
++    public static final int QUALITY_MEDIUM = 1;
++    public static final int QUALITY_HIGH = 2;
++    public static final int QUALITY_ULTRA = 3;
++
++    private GraphicsNative() {}
++
++    // ---- requests
++    /** Re-reads the config files and reloads the engine's own shader programs. */
++    public static native void nativeReloadGraphics();
++
++    /** Re-reads Config.ini, Advanced.ini, shaderUniform.ini and data/eagle_timecyc.dat. */
++    public static native void nativeReloadConfig();
++
++    /** Development hot reload of the engine's own shaders (debug overlay, post-process later). */
++    public static native void nativeReloadShaders();
++
++    /** 0 = LOW, 1 = MEDIUM, 2 = HIGH, 3 = ULTRA (also resets the shadow preset values). */
++    public static native void nativeSetGraphicsQuality(int quality);
++
++    public static native void nativeSetGraphicsEnabled(boolean enabled);
++
++    public static native void nativeSetShadowEnabled(boolean enabled);
++
++    /** Shadow distance in metres (20..600). */
++    public static native void nativeSetShadowDistance(float metres);
++
++    /** Stored now, used by the post-process phase. */
++    public static native void nativeSetBloom(boolean enabled, float intensity);
++
++    /**
++     * Debug flags: "showCascade", "showShadowMap", "showSunDirection", "freezeSun",
++     * "freezeShadowCamera", "perfCounters", "log", "showDepth", "showSSAO".
++     */
++    public static native void nativeSetDebugFlag(String name, boolean value);
++
++    // ---- current values (pending requests included)
++    public static native boolean nativeIsGraphicsEnabled();
++
++    public static native boolean nativeIsShadowEnabled();
++
++    public static native int nativeGetGraphicsQuality();
++
++    public static native float nativeGetShadowDistance();
++
++    public static native boolean nativeGetDebugFlag(String name);
++
++    /** One-line engine status (for a debug menu or logcat). */
++    public static native String nativeGetStatus();
++
++    // ---- shaderUniform.ini: live shader values (no restart, applied on the next frame)
++
++    /** One entry per line: class \t name \t type(bool|int|float) \t value \t min \t max \t step \t used(0|1). */
++    public static native String nativeGetShaderUniforms();
++
++    /** Returns false if the class/name is unknown. The value is clamped to min..max. */
++    public static native boolean nativeSetShaderUniform(String cls, String name, float value);
++
++    /** Writes every value back to shaderUniform.ini. */
++    public static native boolean nativeSaveShaderUniforms();
++
++    /** Values back to the defaults declared in the glShader/*.shader files (not saved). */
++    public static native void nativeResetShaderUniforms();
++
++    // ---- persistence of the player's choices
++
++    /** Stores the current engine values as the player's settings. */
++    public static void saveUserSettings() {
++        try {
++            Storage.setBoolean(KEY_ENABLED, nativeIsGraphicsEnabled());
++            Storage.setBoolean(KEY_SHADOWS, nativeIsShadowEnabled());
++            Storage.setInt(KEY_QUALITY, nativeGetGraphicsQuality());
++            Storage.setInt(KEY_DISTANCE, Math.round(nativeGetShadowDistance()));
++            Storage.setBoolean(KEY_SAVED, true);
++        } catch (Throwable t) {
++            Log.w(TAG, "saveUserSettings failed", t);
++        }
++    }
++
++    /** Forgets the player's settings: Config.ini decides again from the next start. */
++    public static void clearUserSettings() {
++        try {
++            Storage.setBoolean(KEY_SAVED, false);
++        } catch (Throwable t) {
++            Log.w(TAG, "clearUserSettings failed", t);
++        }
++    }
++
++    /** Call once after initSAMP(): re-applies what the player chose in the settings tab. */
++    public static void applySavedSettings() {
++        try {
++            if (!Storage.getBoolean(KEY_SAVED)) return;
++            // Quality first: it loads the preset, the explicit distance overrides it.
++            nativeSetGraphicsQuality(clampQuality(Storage.getInt(KEY_QUALITY)));
++            int distance = Storage.getInt(KEY_DISTANCE);
++            if (distance >= 20) nativeSetShadowDistance(distance);
++            nativeSetGraphicsEnabled(Storage.getBoolean(KEY_ENABLED));
++            nativeSetShadowEnabled(Storage.getBoolean(KEY_SHADOWS));
++        } catch (UnsatisfiedLinkError e) {
++            Log.w(TAG, "libmultiplayer.so without the EAGLE graphics engine", e);
++        } catch (Throwable t) {
++            Log.w(TAG, "applySavedSettings failed", t);
++        }
++    }
++
++    public static int clampQuality(int quality) {
++        return Math.max(QUALITY_LOW, Math.min(QUALITY_ULTRA, quality));
++    }
++
++    public static String qualityName(int quality) {
++        switch (clampQuality(quality)) {
++            case QUALITY_LOW: return "LOW";
++            case QUALITY_MEDIUM: return "MEDIUM";
++            case QUALITY_HIGH: return "HIGH";
++            default: return "ULTRA";
++        }
++    }
++}
+--- /dev/null
++++ b/java/com/holy/game/core/DialogClientSettingsGraphicsFragment.java
+@@ -0,0 +1,393 @@
++package com.holy.game.core;
++
++import android.graphics.Typeface;
++import android.os.Bundle;
++import android.os.Handler;
++import android.os.Looper;
++import android.util.Log;
++import android.util.TypedValue;
++import android.view.Gravity;
++import android.view.LayoutInflater;
++import android.view.View;
++import android.view.ViewGroup;
++import android.widget.LinearLayout;
++import android.widget.SeekBar;
++import android.widget.TextView;
++import android.widget.Toast;
++
++import androidx.annotation.Nullable;
++import androidx.appcompat.widget.SwitchCompat;
++import androidx.fragment.app.Fragment;
++
++import com.holy.game.R;
++
++import java.util.Locale;
++
++/**
++ * "Grafis" tab: controls of the EAGLE graphics engine (sun shadows).
++ *
++ * Every change goes to the native engine right away (applied on the next frame)
++ * and is stored with {@link GraphicsNative#saveUserSettings()}, so the choice
++ * survives a restart. The "Shader Uniform" rows are built from shaderUniform.ini
++ * (like the SA_DOX uniform menu) and saved back to that file.
++ * The reset button of the dialog calls {@link #resetToConfigFile()}: Config.ini
++ * decides again and the shader values return to their defaults.
++ */
++public class DialogClientSettingsGraphicsFragment extends Fragment implements ISaveableFragment {
++    private static final String TAG = "EagleGFX";
++
++    private static final int DISTANCE_MIN = 40;
++    private static final int DISTANCE_STEP = 10;
++    private static final int DISTANCE_MAX = 300;
++
++    private SwitchCompat mSwitchEnabled;
++    private SwitchCompat mSwitchShadows;
++    private SwitchCompat mSwitchDebugCascade;
++    private SwitchCompat mSwitchDebugShadowMap;
++    private SeekBar mSeekQuality;
++    private SeekBar mSeekDistance;
++    private TextView mTextQuality;
++    private TextView mTextDistance;
++    private TextView mTextStatus;
++    private LinearLayout mUniforms;
++
++    private View mRootView = null;
++    private boolean bChangeAllowed = true;
++    private boolean mNativeAvailable = true;
++    private final Handler mHandler = new Handler(Looper.getMainLooper());
++
++    public static DialogClientSettingsGraphicsFragment createInstance(String txt) {
++        return new DialogClientSettingsGraphicsFragment();
++    }
++
++    @Override
++    public void onCreate(Bundle savedInstanceState) {
++        super.onCreate(null);
++    }
++
++    @Override
++    public void onViewStateRestored(@Nullable Bundle savedInstanceState) {
++        super.onViewStateRestored(null);
++    }
++
++    @Override
++    public void onSaveInstanceState(final Bundle outState) {
++        outState.putSerializable("android:support:fragments", null);
++        super.onSaveInstanceState(outState);
++        outState.putSerializable("android:support:fragments", null);
++    }
++
++    @Override
++    public View onCreateView(LayoutInflater inflater,
++                             ViewGroup container,
++                             Bundle savedInstanceState) {
++        mRootView = inflater.inflate(R.layout.dialog_settings_graphics, container, false);
++
++        mSwitchEnabled = mRootView.findViewById(R.id.switch_gfx_enabled);
++        mSwitchShadows = mRootView.findViewById(R.id.switch_gfx_shadows);
++        mSwitchDebugCascade = mRootView.findViewById(R.id.switch_gfx_debug_cascade);
++        mSwitchDebugShadowMap = mRootView.findViewById(R.id.switch_gfx_debug_shadowmap);
++        mSeekQuality = mRootView.findViewById(R.id.seek_gfx_quality);
++        mSeekDistance = mRootView.findViewById(R.id.seek_gfx_shadow_distance);
++        mTextQuality = mRootView.findViewById(R.id.text_gfx_quality_value);
++        mTextDistance = mRootView.findViewById(R.id.text_gfx_shadow_distance_value);
++        mTextStatus = mRootView.findViewById(R.id.text_gfx_status);
++        mUniforms = mRootView.findViewById(R.id.layout_gfx_uniforms);
++
++        mSeekQuality.setMax(GraphicsNative.QUALITY_ULTRA);
++        mSeekDistance.setMax((DISTANCE_MAX - DISTANCE_MIN) / DISTANCE_STEP);
++
++        getValues();
++
++        mSwitchEnabled.setOnCheckedChangeListener((compoundButton, b) -> {
++            if (!bChangeAllowed) return;
++            call(() -> GraphicsNative.nativeSetGraphicsEnabled(b));
++            changed();
++        });
++        mSwitchShadows.setOnCheckedChangeListener((compoundButton, b) -> {
++            if (!bChangeAllowed) return;
++            call(() -> GraphicsNative.nativeSetShadowEnabled(b));
++            changed();
++        });
++        mSwitchDebugCascade.setOnCheckedChangeListener((compoundButton, b) -> {
++            if (!bChangeAllowed) return;
++            call(() -> GraphicsNative.nativeSetDebugFlag("showCascade", b));
++            refreshStatus();
++        });
++        mSwitchDebugShadowMap.setOnCheckedChangeListener((compoundButton, b) -> {
++            if (!bChangeAllowed) return;
++            call(() -> GraphicsNative.nativeSetDebugFlag("showShadowMap", b));
++            refreshStatus();
++        });
++
++        mSeekQuality.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
++            @Override
++            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
++                mTextQuality.setText(GraphicsNative.qualityName(progress));
++            }
++            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
++            @Override
++            public void onStopTrackingTouch(SeekBar seekBar) {
++                if (!bChangeAllowed) return;
++                final int quality = GraphicsNative.clampQuality(seekBar.getProgress());
++                call(() -> GraphicsNative.nativeSetGraphicsQuality(quality));
++                // The quality preset also sets the shadow distance: show the new value.
++                bChangeAllowed = false;
++                setDistance(nativeDistance());
++                bChangeAllowed = true;
++                changed();
++            }
++        });
++
++        mSeekDistance.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
++            @Override
++            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
++                mTextDistance.setText(String.format("%d m", progressToDistance(progress)));
++            }
++            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
++            @Override
++            public void onStopTrackingTouch(SeekBar seekBar) {
++                if (!bChangeAllowed) return;
++                final int distance = progressToDistance(seekBar.getProgress());
++                call(() -> GraphicsNative.nativeSetShadowDistance(distance));
++                changed();
++            }
++        });
++
++        mRootView.findViewById(R.id.button_gfx_reload).setOnClickListener(view -> {
++            reloadFiles();
++            Toast.makeText(getActivity(), "Config.ini dimuat ulang", Toast.LENGTH_SHORT).show();
++        });
++
++        return mRootView;
++    }
++
++    @Override
++    public void onDestroyView() {
++        mHandler.removeCallbacksAndMessages(null);
++        super.onDestroyView();
++    }
++
++    @Override
++    public void save() {
++        if (mNativeAvailable) GraphicsNative.saveUserSettings();
++    }
++
++    @Override
++    public void getValues() {
++        if (mRootView == null) return;
++        bChangeAllowed = false;
++        try {
++            mSwitchEnabled.setChecked(GraphicsNative.nativeIsGraphicsEnabled());
++            mSwitchShadows.setChecked(GraphicsNative.nativeIsShadowEnabled());
++            mSwitchDebugCascade.setChecked(GraphicsNative.nativeGetDebugFlag("showCascade"));
++            mSwitchDebugShadowMap.setChecked(GraphicsNative.nativeGetDebugFlag("showShadowMap"));
++            final int quality = GraphicsNative.clampQuality(GraphicsNative.nativeGetGraphicsQuality());
++            mSeekQuality.setProgress(quality);
++            mTextQuality.setText(GraphicsNative.qualityName(quality));
++            setDistance(nativeDistance());
++        } catch (UnsatisfiedLinkError e) {
++            nativeMissing(e);
++        }
++        bChangeAllowed = true;
++        buildUniformRows();
++        refreshStatus();
++    }
++
++    /** "Muat ulang Config.ini": the files on the phone (edited by hand) decide again. */
++    public void reloadFiles() {
++        call(GraphicsNative::nativeReloadConfig);
++        GraphicsNative.clearUserSettings();
++        // The files are read by the game thread on its next frame.
++        mHandler.postDelayed(this::getValues, 400);
++    }
++
++    /** Dialog reset button: Config.ini decides again, shader values back to the shader defaults. */
++    public void resetToConfigFile() {
++        call(() -> {
++            GraphicsNative.nativeResetShaderUniforms();
++            GraphicsNative.nativeSaveShaderUniforms();
++        });
++        reloadFiles();
++    }
++
++    // ---- shaderUniform.ini rows
++
++    private void buildUniformRows() {
++        if (mUniforms == null) return;
++        mUniforms.removeAllViews();
++        if (!mNativeAvailable) return;
++        String list;
++        try {
++            list = GraphicsNative.nativeGetShaderUniforms();
++        } catch (UnsatisfiedLinkError e) {
++            nativeMissing(e);
++            return;
++        }
++        if (list == null || list.isEmpty()) {
++            mUniforms.addView(text("shaderUniform.ini kosong / belum dimuat", 11, 0x80FFFFFF, false));
++            return;
++        }
++        String lastClass = null;
++        for (String line : list.split("\n")) {
++            final String[] f = line.split("\t");
++            if (f.length < 8) continue;
++            final String cls = f[0];
++            final String name = f[1];
++            final String type = f[2];
++            final float value, min, max, step;
++            try {
++                value = Float.parseFloat(f[3]);
++                min = Float.parseFloat(f[4]);
++                max = Float.parseFloat(f[5]);
++                step = Float.parseFloat(f[6]);
++            } catch (NumberFormatException e) {
++                continue;
++            }
++            final boolean used = "1".equals(f[7]);
++            if (!cls.equals(lastClass)) {
++                mUniforms.addView(text(cls, 12, 0xFFFCD32A, true));
++                lastClass = cls;
++            }
++            final View row = "bool".equals(type)
++                    ? boolRow(cls, name, value > 0.5f)
++                    : numberRow(cls, name, "int".equals(type), value, min, max, step);
++            if (!used) row.setAlpha(0.45f); // not referenced by any glShader file
++            mUniforms.addView(row);
++        }
++    }
++
++    private View boolRow(final String cls, final String name, boolean checked) {
++        SwitchCompat sw = new SwitchCompat(requireContext());
++        sw.setText(name);
++        sw.setTextColor(0xFFFFFFFF);
++        sw.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
++        sw.setChecked(checked);
++        sw.setPadding(dp(10), dp(2), dp(10), dp(2));
++        sw.setOnCheckedChangeListener((b, isChecked) -> {
++            call(() -> GraphicsNative.nativeSetShaderUniform(cls, name, isChecked ? 1.0f : 0.0f));
++            saveUniforms();
++        });
++        return sw;
++    }
++
++    private View numberRow(final String cls, final String name, final boolean integer, float value,
++                           final float min, final float max, final float step) {
++        LinearLayout row = new LinearLayout(requireContext());
++        row.setOrientation(LinearLayout.HORIZONTAL);
++        row.setGravity(Gravity.CENTER_VERTICAL);
++
++        TextView label = text(name, 12, 0xFFFFFFFF, false);
++        row.addView(label, new LinearLayout.LayoutParams(dp(130), ViewGroup.LayoutParams.WRAP_CONTENT));
++
++        final TextView shown = text(formatValue(value, integer), 12, 0xFFFCD32A, false);
++        final SeekBar bar = new SeekBar(requireContext());
++        final float safeStep = step > 0.0f ? step : (integer ? 1.0f : 0.01f);
++        bar.setMax(Math.max(1, Math.round((max - min) / safeStep)));
++        bar.setProgress(Math.round((value - min) / safeStep));
++        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
++            @Override
++            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
++                if (!fromUser) return;
++                final float v = Math.min(max, min + progress * safeStep);
++                shown.setText(formatValue(v, integer));
++                call(() -> GraphicsNative.nativeSetShaderUniform(cls, name, v));
++            }
++            @Override public void onStartTrackingTouch(SeekBar seekBar) {}
++            @Override public void onStopTrackingTouch(SeekBar seekBar) { saveUniforms(); }
++        });
++        row.addView(bar, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f));
++        row.addView(shown, new LinearLayout.LayoutParams(dp(60), ViewGroup.LayoutParams.WRAP_CONTENT));
++        return row;
++    }
++
++    private void saveUniforms() {
++        if (!mNativeAvailable) return;
++        try {
++            if (!GraphicsNative.nativeSaveShaderUniforms())
++                Toast.makeText(getActivity(), "Gagal menyimpan shaderUniform.ini", Toast.LENGTH_SHORT).show();
++        } catch (UnsatisfiedLinkError e) {
++            nativeMissing(e);
++        }
++    }
++
++    private TextView text(String value, int sp, int color, boolean bold) {
++        TextView t = new TextView(requireContext());
++        t.setText(value);
++        t.setTextColor(color);
++        t.setTextSize(TypedValue.COMPLEX_UNIT_SP, sp);
++        if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
++        t.setPadding(dp(10), dp(bold ? 8 : 4), dp(10), dp(4));
++        return t;
++    }
++
++    private static String formatValue(float v, boolean integer) {
++        return integer ? String.valueOf(Math.round(v)) : String.format(Locale.US, "%.2f", v);
++    }
++
++    private int dp(int value) {
++        return Math.round(value * getResources().getDisplayMetrics().density);
++    }
++
++    private void changed() {
++        save();
++        refreshStatus();
++    }
++
++    private void refreshStatus() {
++        if (mTextStatus == null) return;
++        if (!mNativeAvailable) {
++            mTextStatus.setText("libmultiplayer.so tanpa EAGLE graphics engine");
++            return;
++        }
++        try {
++            final String status = GraphicsNative.nativeGetStatus();
++            mTextStatus.setText(status != null ? status.replace(" ", "  ") : "");
++        } catch (UnsatisfiedLinkError e) {
++            nativeMissing(e);
++        }
++    }
++
++    private void setDistance(int metres) {
++        int progress = (metres - DISTANCE_MIN + DISTANCE_STEP / 2) / DISTANCE_STEP;
++        progress = Math.max(0, Math.min(mSeekDistance.getMax(), progress));
++        mSeekDistance.setProgress(progress);
++        mTextDistance.setText(String.format("%d m", progressToDistance(progress)));
++    }
++
++    private static int progressToDistance(int progress) {
++        return DISTANCE_MIN + progress * DISTANCE_STEP;
++    }
++
++    private int nativeDistance() {
++        try {
++            return Math.round(GraphicsNative.nativeGetShadowDistance());
++        } catch (UnsatisfiedLinkError e) {
++            nativeMissing(e);
++            return 160;
++        }
++    }
++
++    private void call(Runnable nativeCall) {
++        if (!mNativeAvailable) return;
++        try {
++            nativeCall.run();
++        } catch (UnsatisfiedLinkError e) {
++            nativeMissing(e);
++        }
++    }
++
++    private void nativeMissing(UnsatisfiedLinkError e) {
++        if (!mNativeAvailable) return;
++        mNativeAvailable = false;
++        Log.w(TAG, "GraphicsNative not found in libmultiplayer.so", e);
++        if (mRootView == null) return;
++        mSwitchEnabled.setEnabled(false);
++        mSwitchShadows.setEnabled(false);
++        mSwitchDebugCascade.setEnabled(false);
++        mSwitchDebugShadowMap.setEnabled(false);
++        mSeekQuality.setEnabled(false);
++        mSeekDistance.setEnabled(false);
++        if (mUniforms != null) mUniforms.removeAllViews();
++    }
++}
+--- /dev/null
++++ b/res/layout/dialog_settings_graphics.xml
+@@ -0,0 +1,254 @@
++<?xml version="1.0" encoding="utf-8"?>
++<!-- EAGLE graphics engine: "Grafis" tab of DialogClientSettings
++     (DialogClientSettingsGraphicsFragment). Same look as dialog_settings_common.xml. -->
++<androidx.appcompat.widget.LinearLayoutCompat
++    xmlns:android="http://schemas.android.com/apk/res/android"
++    android:id="@+id/settings_graphics_root_layout"
++    android:layout_width="wrap_content"
++    android:layout_height="wrap_content"
++    android:layout_gravity="center"
++    android:layout_marginLeft="10dp"
++    android:layout_marginTop="10dp"
++    android:layout_marginRight="10dp"
++    android:layout_marginBottom="10dp"
++    android:background="#E6212121"
++    android:orientation="vertical"
++    android:weightSum="1.0">
++
++    <ScrollView
++        android:layout_width="match_parent"
++        android:layout_height="wrap_content"
++        android:layout_weight="1.0">
++
++        <androidx.appcompat.widget.LinearLayoutCompat
++            android:layout_width="match_parent"
++            android:layout_height="wrap_content"
++            android:layout_gravity="start"
++            android:orientation="vertical">
++
++            <LinearLayout
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginLeft="5dp"
++                android:layout_marginTop="15dp"
++                android:layout_marginRight="5dp"
++                android:layout_marginBottom="10dp"
++                android:orientation="horizontal"
++                android:weightSum="1.0">
++
++                <LinearLayout
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_weight="0.5"
++                    android:orientation="vertical">
++
++                    <androidx.appcompat.widget.SwitchCompat
++                        android:id="@+id/switch_gfx_enabled"
++                        android:layout_width="match_parent"
++                        android:layout_height="wrap_content"
++                        android:layout_gravity="end"
++                        android:layout_marginLeft="10dp"
++                        android:layout_marginRight="10dp"
++                        android:fontFamily="@font/roboto_regular"
++                        android:text="Grafis EAGLE"
++                        android:textColor="@android:color/white"
++                        android:textSize="12sp" />
++
++                    <androidx.appcompat.widget.SwitchCompat
++                        android:id="@+id/switch_gfx_shadows"
++                        android:layout_width="match_parent"
++                        android:layout_height="wrap_content"
++                        android:layout_gravity="end"
++                        android:layout_marginLeft="10dp"
++                        android:layout_marginRight="10dp"
++                        android:fontFamily="@font/roboto_regular"
++                        android:text="Bayangan matahari"
++                        android:textColor="@android:color/white"
++                        android:textSize="12sp" />
++
++                </LinearLayout>
++
++                <LinearLayout
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:layout_weight="0.5"
++                    android:orientation="vertical">
++
++                    <androidx.appcompat.widget.SwitchCompat
++                        android:id="@+id/switch_gfx_debug_cascade"
++                        android:layout_width="match_parent"
++                        android:layout_height="wrap_content"
++                        android:layout_gravity="end"
++                        android:layout_marginLeft="10dp"
++                        android:layout_marginRight="10dp"
++                        android:fontFamily="@font/roboto_regular"
++                        android:text="Debug: warna cascade"
++                        android:textColor="@android:color/white"
++                        android:textSize="12sp" />
++
++                    <androidx.appcompat.widget.SwitchCompat
++                        android:id="@+id/switch_gfx_debug_shadowmap"
++                        android:layout_width="match_parent"
++                        android:layout_height="wrap_content"
++                        android:layout_gravity="end"
++                        android:layout_marginLeft="10dp"
++                        android:layout_marginRight="10dp"
++                        android:fontFamily="@font/roboto_regular"
++                        android:text="Debug: tampilkan shadow map"
++                        android:textColor="@android:color/white"
++                        android:textSize="12sp" />
++
++                </LinearLayout>
++            </LinearLayout>
++
++            <androidx.appcompat.widget.LinearLayoutCompat
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="5dp"
++                android:layout_marginBottom="5dp"
++                android:gravity="center"
++                android:orientation="horizontal">
++
++                <androidx.appcompat.widget.AppCompatTextView
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:paddingLeft="10dp"
++                    android:paddingTop="5dp"
++                    android:paddingRight="10dp"
++                    android:paddingBottom="5dp"
++                    android:text="Kualitas"
++                    android:textColor="@android:color/white"
++                    android:textSize="12sp" />
++
++                <SeekBar
++                    android:id="@+id/seek_gfx_quality"
++                    android:layout_width="0dp"
++                    android:layout_height="wrap_content"
++                    android:layout_weight="1.0"
++                    android:max="3"
++                    android:progress="2" />
++
++                <androidx.appcompat.widget.AppCompatTextView
++                    android:id="@+id/text_gfx_quality_value"
++                    android:layout_width="70dp"
++                    android:layout_height="wrap_content"
++                    android:paddingLeft="5dp"
++                    android:paddingRight="10dp"
++                    android:fontFamily="@font/roboto_medium"
++                    android:text="HIGH"
++                    android:textColor="#FFFCD32A"
++                    android:textSize="12sp" />
++
++            </androidx.appcompat.widget.LinearLayoutCompat>
++
++            <androidx.appcompat.widget.LinearLayoutCompat
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="5dp"
++                android:layout_marginBottom="5dp"
++                android:gravity="center"
++                android:orientation="horizontal">
++
++                <androidx.appcompat.widget.AppCompatTextView
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:paddingLeft="10dp"
++                    android:paddingTop="5dp"
++                    android:paddingRight="10dp"
++                    android:paddingBottom="5dp"
++                    android:text="Jarak bayangan"
++                    android:textColor="@android:color/white"
++                    android:textSize="12sp" />
++
++                <SeekBar
++                    android:id="@+id/seek_gfx_shadow_distance"
++                    android:layout_width="0dp"
++                    android:layout_height="wrap_content"
++                    android:layout_weight="1.0"
++                    android:max="26"
++                    android:progress="12" />
++
++                <androidx.appcompat.widget.AppCompatTextView
++                    android:id="@+id/text_gfx_shadow_distance_value"
++                    android:layout_width="70dp"
++                    android:layout_height="wrap_content"
++                    android:paddingLeft="5dp"
++                    android:paddingRight="10dp"
++                    android:fontFamily="@font/roboto_medium"
++                    android:text="160 m"
++                    android:textColor="#FFFCD32A"
++                    android:textSize="12sp" />
++
++            </androidx.appcompat.widget.LinearLayoutCompat>
++
++            <androidx.appcompat.widget.LinearLayoutCompat
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="5dp"
++                android:gravity="center_vertical"
++                android:orientation="horizontal">
++
++                <androidx.appcompat.widget.AppCompatTextView
++                    android:id="@+id/button_gfx_reload"
++                    android:layout_width="wrap_content"
++                    android:layout_height="wrap_content"
++                    android:clickable="true"
++                    android:focusable="true"
++                    android:foreground="?android:attr/selectableItemBackgroundBorderless"
++                    android:fontFamily="@font/roboto_medium"
++                    android:paddingLeft="10dp"
++                    android:paddingTop="8dp"
++                    android:paddingRight="10dp"
++                    android:paddingBottom="8dp"
++                    android:text="Muat ulang Config.ini"
++                    android:textColor="#FFFCD32A"
++                    android:textSize="12sp" />
++
++                <androidx.appcompat.widget.AppCompatTextView
++                    android:layout_width="match_parent"
++                    android:layout_height="wrap_content"
++                    android:paddingLeft="5dp"
++                    android:paddingRight="10dp"
++                    android:text="Kualitas mengatur ulang resolusi dan jumlah cascade. Perubahan aktif di frame berikutnya."
++                    android:textColor="#B3FFFFFF"
++                    android:textSize="10sp" />
++
++            </androidx.appcompat.widget.LinearLayoutCompat>
++
++            <!-- shaderUniform.ini: rows are created in code (one per value, grouped by class) -->
++            <androidx.appcompat.widget.AppCompatTextView
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginTop="10dp"
++                android:fontFamily="@font/roboto_medium"
++                android:paddingLeft="10dp"
++                android:paddingRight="10dp"
++                android:text="Shader Uniform (shaderUniform.ini) - langsung aktif"
++                android:textColor="@android:color/white"
++                android:textSize="12sp" />
++
++            <LinearLayout
++                android:id="@+id/layout_gfx_uniforms"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:orientation="vertical" />
++
++            <androidx.appcompat.widget.AppCompatTextView
++                android:id="@+id/text_gfx_status"
++                android:layout_width="match_parent"
++                android:layout_height="wrap_content"
++                android:layout_marginBottom="10dp"
++                android:fontFamily="monospace"
++                android:paddingLeft="10dp"
++                android:paddingTop="5dp"
++                android:paddingRight="10dp"
++                android:paddingBottom="5dp"
++                android:text=""
++                android:textColor="#80FFFFFF"
++                android:textSize="9sp" />
++
++        </androidx.appcompat.widget.LinearLayoutCompat>
++
++    </ScrollView>
++
++</androidx.appcompat.widget.LinearLayoutCompat>

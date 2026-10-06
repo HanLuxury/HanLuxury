@@ -25,8 +25,8 @@ class GraphicsEngine {
 public:
     static GraphicsEngine& Get();
 
-    // Loads graphics.ini, opens graphics.log, configures the shader patcher and
-    // installs the hooks. Must run before GTA compiles its shaders.
+    // Loads Config.ini/Advanced.ini/shaderUniform.ini, opens logOutput.log, configures
+    // the shader patcher and installs the hooks. Must run before GTA compiles its shaders.
     void EarlyInit();
     void Shutdown();
 
@@ -43,6 +43,9 @@ public:
     void SetShadowDistance(float metres);
     void SetBloom(bool enabled, float intensity);
     void SetDebugFlag(const std::string& name, bool value);
+    // Settings as they will be applied on the next frame (requests included).
+    GraphicsConfig ConfigSnapshot();
+    bool GetDebugFlag(const std::string& name);
     std::string StatusString();
 
     bool ShouldSuppressGtaShadows() const { return m_suppressGtaShadows.load(std::memory_order_relaxed); }
@@ -52,6 +55,7 @@ private:
     GraphicsEngine() = default;
     void ApplyPendingRequests();
     void ApplyConfig(bool logSummary);
+    void ArmReceivers();
     void UpdateAdaptiveQuality(float frameMs);
     void LogPerformance(float shadowCpuMs);
 

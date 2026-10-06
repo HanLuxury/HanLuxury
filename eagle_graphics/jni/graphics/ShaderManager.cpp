@@ -1,4 +1,5 @@
 #include "ShaderManager.h"
+#include "GlShader.h"
 #include "GraphicsLog.h"
 #include "GraphicsPaths.h"
 
@@ -55,19 +56,33 @@ void ShaderManager::RegisterEmbedded(const std::string& name, const char* source
     if (source) m_embedded[name] = source;
 }
 
-bool ShaderManager::LoadShaderFile(const std::string& name, std::string& out, bool* fromFile) const {
-    const std::string base = m_baseDir.empty() ? std::string(paths::kShaders) : m_baseDir;
-    if (ReadTextFile(base + name, out) && !out.empty()) {
+bool ShaderManager::ReadFile(const std::string& path, std::string& out, bool* fromFile, bool embeddedOnly) const {
+    const std::string base = m_baseDir.empty() ? std::string(paths::kGlShader) : m_baseDir;
+    if (!embeddedOnly && ReadTextFile(base + path, out) && !out.empty()) {
         if (fromFile) *fromFile = true;
         return true;
     }
-    auto it = m_embedded.find(name);
-    if (it == m_embedded.end()) {
-        if (fromFile) *fromFile = false;
-        return false;
-    }
-    out = it->second;
     if (fromFile) *fromFile = false;
+    auto it = m_embedded.find(path);
+    if (it == m_embedded.end()) return false;
+    out = it->second;
+    return true;
+}
+
+bool ShaderManager::LoadShaderFile(const std::string& name, std::string& out, bool* fromFile) const {
+    const size_t colon = name.rfind(':');
+    if (colon == std::string::npos) return ReadFile(name, out, fromFile);
+    const std::string path = name.substr(0, colon);
+    const std::string stage = name.substr(colon + 1);
+    GlShader::BuildResult result;
+    bool ok = GlShader::LoadStage(path, stage.c_str(), result);
+    if (!ok) {
+        GFX_LOGE(kTag, "%s: %s, using the built-in copy", name.c_str(), result.error.c_str());
+        ok = GlShader::LoadStage(path, stage.c_str(), result, true);
+    }
+    if (!ok) return false;
+    out = result.code;
+    if (fromFile) *fromFile = result.fromFile;
     return true;
 }
 

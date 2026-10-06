@@ -37,7 +37,7 @@
      const char *dirChars = env->GetStringUTFChars(directory, nullptr);
 --- a/jni/CMakeLists.txt
 +++ b/jni/CMakeLists.txt
-@@ -45,6 +45,32 @@
+@@ -45,6 +45,34 @@
  list(FILTER SOURCES EXCLUDE REGEX "/AML/")
  list(FILTER SOURCES EXCLUDE REGEX "/modloader/tests/")
  
@@ -54,6 +54,8 @@
 +        ${CMAKE_CURRENT_LIST_DIR}/graphics/GLCaps.cpp
 +        ${CMAKE_CURRENT_LIST_DIR}/graphics/GLStateBackup.cpp
 +        ${CMAKE_CURRENT_LIST_DIR}/graphics/ShaderManager.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GlShader.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/ShaderUniforms.cpp
 +        ${CMAKE_CURRENT_LIST_DIR}/graphics/ShaderPatcher.cpp
 +        ${CMAKE_CURRENT_LIST_DIR}/graphics/FrameBuffer.cpp
 +        ${CMAKE_CURRENT_LIST_DIR}/graphics/SunManager.cpp

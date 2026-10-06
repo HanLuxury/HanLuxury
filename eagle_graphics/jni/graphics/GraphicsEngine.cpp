@@ -1,12 +1,14 @@
 #include "GraphicsEngine.h"
-#include "EmbeddedShaders.h"
+#include "EmbeddedGlShader.h"
 #include "GameRenderBridge.h"
+#include "GlShader.h"
 #include "GraphicsHooks.h"
 #include "GraphicsLog.h"
 #include "GraphicsPaths.h"
 #include "RenderQueueBridge.h"
 #include "ShaderManager.h"
 #include "ShaderPatcher.h"
+#include "ShaderUniforms.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,12 +23,35 @@ void ReloadShadersOnGlThread(void*) {
     ShaderManager::Get().ReloadAll();
 }
 
-std::string LoadReceiverSnippet() {
-    std::string snippet;
-    bool fromFile = false;
-    if (ShaderManager::Get().LoadShaderFile("world_shadow.glsl", snippet, &fromFile))
-        GFX_LOGI(kTag, "world_shadow.glsl: %s", fromFile ? "loaded from TESTLIT" : "embedded default");
-    return snippet;
+// glShader/Entity/*.shader -> receiver snippets. A file that fails to build or
+// breaks the snippet contract is replaced by its built-in copy.
+ReceiverSnippets LoadReceiverSnippets(bool verbose) {
+    static const char* const kFiles[3] = {paths::kShaderBuilding, paths::kShaderVehicle, paths::kShaderCharacter};
+    ReceiverSnippets out;
+    for (int i = 0; i < 3; ++i) {
+        GlShader::BuildResult r;
+        bool ok = GlShader::BuildReceiver(kFiles[i], ShaderUniforms::Get(), r);
+        std::string why;
+        if (ok && !ShaderPatcher::ValidateSnippet(ShaderPatcher::SanitizeSnippet(r.code), why)) {
+            ok = false;
+            r.error = why;
+        }
+        if (!ok) {
+            GFX_LOGE(kTag, "glShader/%s: %s -> built-in copy", kFiles[i], r.error.c_str());
+            ok = GlShader::BuildReceiver(kFiles[i], ShaderUniforms::Get(), r, true);
+        }
+        if (!ok) {
+            GFX_LOGE(kTag, "glShader/%s: built-in copy failed too (%s)", kFiles[i], r.error.c_str());
+            continue;
+        }
+        out.snippet[i] = r.code;
+        if (verbose) {
+            std::string files;
+            for (const std::string& f : r.files) files += (files.empty() ? "" : ", ") + f;
+            GFX_LOGI(kTag, "Loaded Shader - glShader/%s [%s] %d params", kFiles[i], files.c_str(), r.params);
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -41,7 +66,7 @@ void GraphicsEngine::EarlyInit() {
     GraphicsLog::Init(paths::kLog);
     GFX_LOGI(kTag, "EAGLE GraphicsEngine starting (GTA SA 2.10 arm64, no AML)");
 
-    m_config.Load(paths::kConfig);
+    m_config.Load(paths::kConfig, paths::kAdvanced, paths::kLegacyConfig);
     GraphicsLog::SetDebugEnabled(m_config.debug.log);
     m_config.LogSummary();
     {
@@ -49,14 +74,16 @@ void GraphicsEngine::EarlyInit() {
         m_pendingConfig = m_config;
         m_hasPendingConfig = false;
     }
+    ShaderUniforms::Get().Load(paths::kShaderUniform);
+    m_timeCycle.LoadProfiles(paths::kTimecyc);
 
     ShaderManager& sm = ShaderManager::Get();
-    sm.SetBaseDir(paths::kShaders);
+    sm.SetBaseDir(paths::kGlShader);
     RegisterEmbeddedShaders(sm);
 
     const bool receivers = m_config.graphics.enabled && m_config.shadow.enabled;
     ShaderPatcher::Configure(receivers, m_config.shadow.hardwarePcf, m_config.shadow.pcf, m_config.shadow.cascadeBlend,
-                             m_config.shadow.water, LoadReceiverSnippet());
+                             m_config.shadow.water, LoadReceiverSnippets(true));
     if (!receivers)
         GFX_LOGW(kTag, "shadows disabled at startup: GTA shaders are not patched (enable + restart to get receivers)");
 
@@ -89,13 +116,15 @@ void GraphicsEngine::ApplyConfig(bool logSummary) {
     // Receiver code generation only affects shaders GTA builds from now on.
     ShaderPatcher::Configure(ShaderPatcher::Enabled() || (m_config.graphics.enabled && m_config.shadow.enabled),
                              m_config.shadow.hardwarePcf, m_config.shadow.pcf, m_config.shadow.cascadeBlend,
-                             m_config.shadow.water, LoadReceiverSnippet());
+                             m_config.shadow.water, LoadReceiverSnippets(logSummary));
     ShadowGpu::ResetFailure();
 }
 
 void GraphicsEngine::ApplyPendingRequests() {
     if (m_reloadConfig.exchange(false)) {
-        m_config.Load(paths::kConfig);
+        m_config.Load(paths::kConfig, paths::kAdvanced, paths::kLegacyConfig);
+        ShaderUniforms::Get().Load(paths::kShaderUniform);
+        m_timeCycle.LoadProfiles(paths::kTimecyc);
         {
             std::lock_guard<std::mutex> lock(m_requestMutex);
             m_pendingConfig = m_config;
@@ -115,7 +144,7 @@ void GraphicsEngine::ApplyPendingRequests() {
     if (m_reloadShaders.exchange(false)) {
         if (RenderQueueBridge::Enqueue(&ReloadShadersOnGlThread, nullptr))
             GFX_LOGI(kTag, "engine shaders reload requested (GTA world shaders keep their code until restart)");
-        ApplyConfig(false); // re-reads world_shadow.glsl for future GTA shader builds
+        ApplyConfig(false); // re-reads glShader/Entity/*.shader for future GTA shader builds
     }
 }
 
@@ -147,7 +176,13 @@ void GraphicsEngine::OnShadowPoint() {
     UpdateAdaptiveQuality(frameMs);
     m_shadows.SetDistanceScale(m_distanceScale);
     const bool drawn = m_shadows.RenderShadowPass(sun, m_tod, camera, m_config);
-    m_suppressGtaShadows.store(drawn && m_config.shadow.suppressGtaShadows, std::memory_order_relaxed);
+    // GTA's blob shadows only go away when the sun shadow can replace them: under
+    // heavy cloud/rain the sun shadow fades to a few percent and cars/peds would
+    // lose their contact shadow.
+    constexpr float kMinStrengthToReplaceGtaShadows = 0.25f;
+    m_suppressGtaShadows.store(drawn && m_config.shadow.suppressGtaShadows &&
+                                   sun.shadowStrength >= kMinStrengthToReplaceGtaShadows,
+                               std::memory_order_relaxed);
 
     if (drawn && !m_loggedFirstFrame) {
         m_loggedFirstFrame = true;
@@ -216,22 +251,44 @@ void GraphicsEngine::RequestReloadConfig() { m_reloadConfig.store(true); }
 void GraphicsEngine::RequestReloadShaders() { m_reloadShaders.store(true); }
 
 void GraphicsEngine::SetQuality(int quality) {
-    std::lock_guard<std::mutex> lock(m_requestMutex);
-    m_pendingConfig.ApplyQualityPreset(static_cast<GraphicsQuality>(std::clamp(quality, 0, 3)));
-    m_pendingConfig.Validate();
-    m_hasPendingConfig = true;
+    {
+        std::lock_guard<std::mutex> lock(m_requestMutex);
+        m_pendingConfig.ApplyQualityPreset(static_cast<GraphicsQuality>(std::clamp(quality, 0, 3)));
+        m_pendingConfig.Validate();
+        m_hasPendingConfig = true;
+    }
+    ArmReceivers();
 }
 
 void GraphicsEngine::SetEnabled(bool enabled) {
-    std::lock_guard<std::mutex> lock(m_requestMutex);
-    m_pendingConfig.graphics.enabled = enabled;
-    m_hasPendingConfig = true;
+    {
+        std::lock_guard<std::mutex> lock(m_requestMutex);
+        m_pendingConfig.graphics.enabled = enabled;
+        m_hasPendingConfig = true;
+    }
+    ArmReceivers();
 }
 
 void GraphicsEngine::SetShadowEnabled(bool enabled) {
-    std::lock_guard<std::mutex> lock(m_requestMutex);
-    m_pendingConfig.shadow.enabled = enabled;
-    m_hasPendingConfig = true;
+    {
+        std::lock_guard<std::mutex> lock(m_requestMutex);
+        m_pendingConfig.shadow.enabled = enabled;
+        m_hasPendingConfig = true;
+    }
+    ArmReceivers();
+}
+
+// Requests are applied on the next in-game frame, but GTA builds most world
+// shaders during loading. When the player's saved settings turn shadows on
+// (GraphicsNative.applySavedSettings runs before the game starts), enable the
+// receiver patch right away so those builds already get it. Configure is
+// mutex-protected against ShaderPatcher::OnBuild on the RQ thread.
+void GraphicsEngine::ArmReceivers() {
+    const GraphicsConfig cfg = ConfigSnapshot();
+    if (!cfg.graphics.enabled || !cfg.shadow.enabled || ShaderPatcher::Enabled()) return;
+    ShaderPatcher::Configure(true, cfg.shadow.hardwarePcf, cfg.shadow.pcf, cfg.shadow.cascadeBlend, cfg.shadow.water,
+                             LoadReceiverSnippets(false));
+    GFX_LOGI(kTag, "shadow receivers armed by a settings request (affects shaders built from now on)");
 }
 
 void GraphicsEngine::SetShadowDistance(float metres) {
@@ -265,12 +322,28 @@ void GraphicsEngine::SetDebugFlag(const std::string& name, bool value) {
     m_hasPendingConfig = true;
 }
 
+GraphicsConfig GraphicsEngine::ConfigSnapshot() {
+    std::lock_guard<std::mutex> lock(m_requestMutex);
+    return m_pendingConfig;
+}
+
+bool GraphicsEngine::GetDebugFlag(const std::string& name) {
+    const GraphicsConfig cfg = ConfigSnapshot();
+    const DebugSettings& d = cfg.debug;
+    if (name == "showCascade") return d.showCascade;
+    if (name == "showShadowMap") return d.showShadowMap;
+    if (name == "showDepth") return d.showDepth;
+    if (name == "showSSAO") return d.showSsao;
+    if (name == "showSunDirection") return d.showSunDirection;
+    if (name == "freezeSun") return cfg.sun.freeze;
+    if (name == "freezeShadowCamera") return d.freezeShadowCamera;
+    if (name == "perfCounters") return d.perfCounters;
+    if (name == "log") return d.log;
+    return false;
+}
+
 std::string GraphicsEngine::StatusString() {
-    GraphicsConfig cfg;
-    {
-        std::lock_guard<std::mutex> lock(m_requestMutex);
-        cfg = m_pendingConfig;
-    }
+    const GraphicsConfig cfg = ConfigSnapshot();
     char buffer[512];
     std::snprintf(buffer, sizeof(buffer),
                   "initialized=%d enabled=%d quality=%s shadows=%d cascades=%d resolution=%d distance=%.0f "

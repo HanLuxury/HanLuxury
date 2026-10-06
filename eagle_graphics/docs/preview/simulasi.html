@@ -1,0 +1,424 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EAGLE Graphics Preview</title>
+<style>
+  :root { --fg: #f4f1ea; --muted: #c9c4b8; --accent: #fcd32a; --bg: #101010; }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; font-family: "Segoe UI", Roboto, sans-serif; }
+  canvas { display: block; }
+  #label { position: absolute; left: 18px; top: 14px; color: var(--fg); text-shadow: 0 1px 3px #000; pointer-events: none; }
+  #label .title { font-size: 26px; font-weight: 700; letter-spacing: .5px; }
+  #label .title b { color: var(--accent); }
+  #label .sub { font-size: 14px; color: var(--muted); margin-top: 2px; }
+  #note { position: absolute; right: 14px; bottom: 10px; color: #ffffffc0; font-size: 12px; text-shadow: 0 1px 2px #000; pointer-events: none; }
+</style>
+</head>
+<body>
+<div id="label"><div class="title"></div><div class="sub"></div></div>
+<div id="note">SIMULASI WebGL dari model lighting engine EAGLE - bukan screenshot dari game</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+// ---------------------------------------------------------------------------
+// Parameters: #mode=eagle|gta&shot=noon|sunset|night|rain|cascade&w=1280&h=720
+// ---------------------------------------------------------------------------
+const P = Object.fromEntries(new URLSearchParams(location.hash.slice(1)));
+const MODE = P.mode || 'eagle';
+const SHOT = P.shot || 'noon';
+const W = +(P.w || 1280), H = +(P.h || 720);
+
+// Seeded random so every render is identical.
+let seed = 1337;
+function rnd() { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; }
+
+// ---- engine model (values from TESTLIT/graphics: Config.ini, Advanced.ini, data/eagle_timecyc.dat)
+const CFG = { strength: 0.78, sunBoost: 0.10, prelitShare: 0.85, minElevation: 9 };
+const LOOK = {
+  noon:   { hour: 12.0,  int: 1.00, sunColor: [1.00, 0.96, 0.90], shdStr: 1.00, tint: [0.46, 0.50, 0.60], boost: 1.00 },
+  sunset: { hour: 18.33, int: 0.92, sunColor: [1.00, 0.62, 0.34], shdStr: 0.88, tint: [0.50, 0.45, 0.60], boost: 1.35 },
+  night:  { hour: 23.0,  int: 0.00, sunColor: [0.55, 0.62, 0.85], shdStr: 0.00, tint: [0.70, 0.72, 0.82], boost: 0.00 },
+  rain:   { hour: 14.0,  int: 0.25, sunColor: [0.84, 0.88, 0.92], shdStr: 0.10, tint: [0.64, 0.68, 0.74], boost: 0.10 },
+};
+LOOK.cascade = LOOK.noon;
+const look = LOOK[SHOT] || LOOK.noon;
+
+// GTA sun vector (CTimeCycle::CalcColoursForPoint): normalize(sin a + 0.7, -0.7, 0.2 - cos a), a = minutes*2pi/1440
+function gtaToSun(hour) {
+  const a = hour * 60 * 2 * Math.PI / 1440;
+  const v = new THREE.Vector3(Math.sin(a) + 0.7, -0.7, 0.2 - Math.cos(a)).normalize();
+  // GTA z-up -> three.js y-up; the sunset shot uses an east-west street (sun from the left)
+  const out = new THREE.Vector3(v.x, v.z, -v.y).normalize();
+  if (SHOT === 'sunset') {
+    const want = Math.atan2(-0.97, -0.25), have = Math.atan2(out.x, out.z);
+    out.applyAxisAngle(new THREE.Vector3(0, 1, 0), want - have);
+  }
+  return out;
+}
+let toSun = gtaToSun(look.hour);
+// SunManager: clamp the elevation used for shadow projection (no infinite shadows)
+const minEl = THREE.MathUtils.degToRad(CFG.minElevation);
+if (Math.asin(toSun.y) < minEl && toSun.y > 0) {
+  const flat = new THREE.Vector3(toSun.x, 0, toSun.z).normalize();
+  toSun = flat.multiplyScalar(Math.cos(minEl)).add(new THREE.Vector3(0, Math.sin(minEl), 0)).normalize();
+}
+const sunStrength = CFG.strength * look.shdStr;            // SG_Light.w
+const castsShadows = MODE === 'eagle' && sunStrength > 0.01 && toSun.y > 0;
+const replaceBlobs = castsShadows && sunStrength >= 0.25;  // GraphicsEngine: kMinStrengthToReplaceGtaShadows
+
+// ---- renderer / scene
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(W, H);
+renderer.shadowMap.enabled = castsShadows;
+renderer.shadowMap.type = P.st === '0' ? THREE.BasicShadowMap : (P.st === '1' ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const SKY = {
+  noon:   { top: 0x4f86cf, hor: 0xc2d6e8, fog: 0xc8d6e2, near: 140, far: 620, amb: 1.00 },
+  sunset: { top: 0x2c3e6e, hor: 0xf59b52, fog: 0xd99668, near: 120, far: 560, amb: 0.80 },
+  night:  { top: 0x03060f, hor: 0x18213a, fog: 0x121a2c, near: 60,  far: 420, amb: 0.30 },
+  rain:   { top: 0x5f676f, hor: 0x969fa5, fog: 0x8b949a, near: 30,  far: 240, amb: 0.82 },
+};
+SKY.cascade = SKY.noon;
+const sky = SKY[SHOT] || SKY.noon;
+scene.fog = new THREE.Fog(sky.fog, sky.near, sky.far);
+scene.background = new THREE.Color(sky.hor);
+
+// Sky dome with a vertical gradient + sun disc
+{
+  const g = new THREE.SphereGeometry(900, 32, 16);
+  const m = new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { top: { value: new THREE.Color(sky.top) }, hor: { value: new THREE.Color(sky.hor) },
+                sunDir: { value: gtaToSun(look.hour) }, sunCol: { value: new THREE.Color(...look.sunColor) },
+                showSun: { value: (SHOT === 'noon' || SHOT === 'sunset' || SHOT === 'cascade') ? 1.0 : 0.0 } },
+    vertexShader: 'varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+    fragmentShader: `uniform vec3 top, hor, sunDir, sunCol; uniform float showSun; varying vec3 vDir;
+      void main(){ float h = clamp(vDir.y, 0.0, 1.0); vec3 c = mix(hor, top, pow(h, 0.55));
+        float d = max(dot(normalize(vDir), normalize(sunDir)), 0.0);
+        c += showSun * sunCol * (pow(d, 900.0) * 3.0 + pow(d, 24.0) * 0.35);
+        gl_FragColor = vec4(c, 1.0); }`
+  });
+  scene.add(new THREE.Mesh(g, m));
+}
+
+// ---- GTA's own lighting (ambient + directional, never shadowed: GTA has no sun shadows)
+const GTA_LIGHT = {
+  noon:   { amb: [0.60, 0.62, 0.68], dir: 0.62 },
+  sunset: { amb: [0.50, 0.46, 0.56], dir: 0.72 },
+  night:  { amb: [0.20, 0.23, 0.34], dir: 0.00 },
+  rain:   { amb: [0.70, 0.72, 0.75], dir: 0.25 },
+};
+GTA_LIGHT.cascade = GTA_LIGHT.noon;
+const gl0 = GTA_LIGHT[SHOT] || GTA_LIGHT.noon;
+scene.add(new THREE.AmbientLight(new THREE.Color(...gl0.amb), 1.0));
+const sunLight = new THREE.DirectionalLight(new THREE.Color(...look.sunColor).multiplyScalar(gl0.dir * (toSun.y > 0 ? 1 : 0)), 1.0);
+sunLight.target.position.set(0, 0, -40);
+sunLight.position.copy(toSun).multiplyScalar(250).add(sunLight.target.position);
+sunLight.castShadow = castsShadows;
+sunLight.shadow.mapSize.set(+(P.sm || 4096), +(P.sm || 4096));
+sunLight.shadow.camera.left = -150; sunLight.shadow.camera.right = 150;
+sunLight.shadow.camera.top = 150; sunLight.shadow.camera.bottom = -150;
+sunLight.shadow.camera.near = 10; sunLight.shadow.camera.far = 600;
+sunLight.shadow.bias = -0.0004;
+sunLight.shadow.normalBias = 0.04;
+scene.add(sunLight, sunLight.target);
+if (SHOT === 'night') scene.add(new THREE.HemisphereLight(0x22304f, 0x0a0a10, 0.35));
+
+// ---- EAGLE receiver (glShader/realtimeShadow.shader SG_Shade + Entity/*.shader), applied on top
+// of GTA's colour and before fog - exactly where ShaderPatcher injects SG_Apply(fcolor).
+const SPLITS = [17.6, 48.9, 160.0];
+const SGU = {
+  uSGOn: { value: castsShadows ? 1.0 : 0.0 },
+  uSGStrength: { value: sunStrength },                 // SG_Light.w
+  uSGShare: { value: CFG.prelitShare },                // SG_Tint.a (prelit direct share)
+  uSGTint: { value: new THREE.Color(...look.tint) },   // SG_Tint.rgb
+  uSGBoost: { value: new THREE.Color(...look.sunColor).multiplyScalar(CFG.sunBoost * look.boost * look.int) }, // SG_Boost
+  uSGCascade: { value: SHOT === 'cascade' ? 1.0 : 0.0 },
+  uSGSunView: { value: new THREE.Vector3() },
+};
+const LIGHTS_NO_SHADOW = THREE.ShaderChunk.lights_fragment_begin.split('\n').filter(l => l.indexOf('getShadow(') < 0).join('\n');
+function patch(mat) {
+  mat.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, SGU);
+    sh.vertexShader = 'uniform vec3 uSGSunView;\nvarying float vSGnl;\nvarying float vSGDepth;\n' + sh.vertexShader
+      .replace('#include <defaultnormal_vertex>', '#include <defaultnormal_vertex>\nvSGnl = dot(normalize(transformedNormal), uSGSunView);')
+      .replace('#include <project_vertex>', '#include <project_vertex>\nvSGDepth = -mvPosition.z;');
+    let fs = sh.fragmentShader;
+    // GTA lighting stays unshadowed ...
+    fs = fs.replace('* getShadowMask();', ';');
+    fs = fs.replace('#include <lights_fragment_begin>', LIGHTS_NO_SHADOW);
+    if (fs.indexOf('#include <shadowmask_pars_fragment>') < 0)
+      fs = fs.replace('#include <shadowmap_pars_fragment>', '#include <shadowmap_pars_fragment>\n#include <shadowmask_pars_fragment>');
+    // ... and SG_Shade is applied on top of it.
+    fs = 'uniform float uSGOn, uSGStrength, uSGShare, uSGCascade;\nuniform vec3 uSGTint, uSGBoost;\nvarying float vSGnl;\nvarying float vSGDepth;\n' + fs;
+    fs = fs.replace('#include <fog_fragment>', `
+      if (uSGOn > 0.5) {
+        float vis = min(getShadowMask(), smoothstep(-0.03, 0.22, vSGnl));
+        float sh = clamp((1.0 - vis) * uSGStrength * uSGShare, 0.0, 1.0);
+        gl_FragColor.rgb *= mix(vec3(1.0), uSGTint, sh);
+        gl_FragColor.rgb *= vec3(1.0) + uSGBoost * (vis * max(vSGnl, 0.0));
+        if (uSGCascade > 0.5 && vSGDepth < ${SPLITS[2].toFixed(1)}) {
+          vec3 cc = vSGDepth < ${SPLITS[0].toFixed(1)} ? vec3(1.0, 0.35, 0.35) : (vSGDepth < ${SPLITS[1].toFixed(1)} ? vec3(0.35, 1.0, 0.35) : vec3(0.35, 0.45, 1.0));
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, cc * (0.35 + 0.65 * vis), 0.5);
+        }
+      }
+      #include <fog_fragment>`);
+    sh.fragmentShader = fs;
+  };
+  return mat;
+}
+
+// ---- procedural textures
+function canvasTex(w, h, draw, repeat) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  draw(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c);
+  t.anisotropy = 8;
+  if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat[0], repeat[1]); }
+  return t;
+}
+function noise(ctx, w, h, base, amp, n) {
+  ctx.fillStyle = base; ctx.fillRect(0, 0, w, h);
+  for (let i = 0; i < n; i++) {
+    const v = Math.floor((rnd() - 0.5) * amp);
+    ctx.fillStyle = `rgba(${v > 0 ? 255 : 0},${v > 0 ? 255 : 0},${v > 0 ? 255 : 0},${Math.abs(v) / 255})`;
+    ctx.fillRect(rnd() * w, rnd() * h, 2, 2);
+  }
+}
+const wet = SHOT === 'rain';
+const asphalt = canvasTex(512, 512, (c, w, h) => {
+  noise(c, w, h, wet ? '#3c3e41' : '#55575a', 60, 9000);
+  c.strokeStyle = wet ? 'rgba(20,20,22,.5)' : 'rgba(40,40,40,.35)'; c.lineWidth = 3;
+  for (let i = 0; i < 6; i++) { c.beginPath(); c.moveTo(rnd() * w, 0); c.lineTo(rnd() * w, h); c.stroke(); }
+}, [3, 30]);
+const sidewalk = canvasTex(256, 256, (c, w, h) => {
+  noise(c, w, h, wet ? '#8d8a84' : '#b9b3a7', 40, 3000);
+  c.strokeStyle = 'rgba(70,65,60,.45)'; c.lineWidth = 2;
+  for (let i = 0; i <= 4; i++) { c.beginPath(); c.moveTo(i * 64, 0); c.lineTo(i * 64, h); c.stroke(); c.beginPath(); c.moveTo(0, i * 64); c.lineTo(w, i * 64); c.stroke(); }
+}, [1.5, 60]);
+const grass = canvasTex(256, 256, (c, w, h) => noise(c, w, h, '#6f7d48', 70, 6000), [40, 40]);
+
+const PALETTE = ['#d9c7a6', '#c98d6a', '#e8e1d2', '#9fb4c4', '#c9b48a', '#b57a5c', '#d8d0bd', '#8e9aa6', '#e2c9a0'];
+function facade(color, floors, cols, night) {
+  // returns { map, emi }: emi holds only the lit windows (night)
+  const c1 = document.createElement('canvas'), c2 = document.createElement('canvas');
+  c1.width = c2.width = 256; c1.height = c2.height = 512;
+  const c = c1.getContext('2d'), e = c2.getContext('2d'), w = 256, h = 512;
+  noise(c, w, h, color, 26, 2500);
+  e.fillStyle = '#000'; e.fillRect(0, 0, w, h);
+  const fh = h / floors, cw = w / cols;
+  for (let y = 0; y < floors; y++) for (let x = 0; x < cols; x++) {
+    const lit = night && rnd() < 0.35;
+    const col = lit ? `rgb(${230 + rnd() * 25},${190 + rnd() * 40},${110 + rnd() * 40})` : `rgb(${50 + rnd() * 30},${70 + rnd() * 30},${95 + rnd() * 35})`;
+    c.fillStyle = col; c.fillRect(x * cw + cw * 0.18, y * fh + fh * 0.2, cw * 0.64, fh * 0.55);
+    c.fillStyle = 'rgba(255,255,255,.12)'; c.fillRect(x * cw + cw * 0.18, y * fh + fh * 0.2, cw * 0.64, fh * 0.08);
+    if (lit) { e.fillStyle = col; e.fillRect(x * cw + cw * 0.18, y * fh + fh * 0.2, cw * 0.64, fh * 0.55); }
+  }
+  c.fillStyle = 'rgba(0,0,0,.18)'; c.fillRect(0, h - fh * 0.9, w, fh * 0.9);
+  const map = new THREE.CanvasTexture(c1), emi = new THREE.CanvasTexture(c2);
+  map.anisotropy = emi.anisotropy = 8;
+  return { map, emi };
+}
+const leafTex = canvasTex(256, 64, (c, w, h) => {
+  c.clearRect(0, 0, w, h);
+  c.strokeStyle = '#3d5a1e'; c.lineWidth = 4; c.beginPath(); c.moveTo(0, h / 2); c.lineTo(w, h / 2); c.stroke();
+  for (let x = 6; x < w - 6; x += 7) {
+    const len = (h / 2 - 3) * Math.sin(Math.PI * x / w);
+    c.strokeStyle = rnd() < 0.5 ? '#4f7a26' : '#3f6a1f'; c.lineWidth = 3;
+    c.beginPath(); c.moveTo(x, h / 2); c.lineTo(x + 10, h / 2 - len); c.stroke();
+    c.beginPath(); c.moveTo(x, h / 2); c.lineTo(x + 10, h / 2 + len); c.stroke();
+  }
+});
+const blobTex = canvasTex(128, 128, (c, w, h) => {
+  const g = c.createRadialGradient(w / 2, h / 2, 4, w / 2, h / 2, w / 2);
+  g.addColorStop(0, 'rgba(0,0,0,.62)'); g.addColorStop(0.6, 'rgba(0,0,0,.35)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  c.fillStyle = g; c.fillRect(0, 0, w, h);
+});
+
+function lambert(opts) { return patch(new THREE.MeshLambertMaterial(opts)); }
+function phong(opts) { return patch(new THREE.MeshPhongMaterial(opts)); }
+function add(mesh, cast = true, receive = true) { mesh.castShadow = cast; mesh.receiveShadow = receive; scene.add(mesh); return mesh; }
+
+// ---- ground: road, sidewalks, grass
+add(new THREE.Mesh(new THREE.PlaneGeometry(1200, 1200).rotateX(-Math.PI / 2), lambert({ map: grass })), false).position.y = -0.05;
+add(new THREE.Mesh(new THREE.PlaneGeometry(14, 520).rotateX(-Math.PI / 2),
+  wet ? phong({ map: asphalt, shininess: 90, specular: 0x555555 }) : lambert({ map: asphalt })), false).position.set(0, 0, -150);
+for (const sx of [-1, 1]) {
+  const s = add(new THREE.Mesh(new THREE.BoxGeometry(5, 0.18, 520), lambert({ map: sidewalk })), false);
+  s.position.set(sx * 9.5, 0.09, -150);
+}
+// lane markings
+const yellow = lambert({ color: 0xd8b13a }), white = lambert({ color: 0xe6e6e0 });
+for (const dx of [-0.18, 0.18]) add(new THREE.Mesh(new THREE.PlaneGeometry(0.12, 520).rotateX(-Math.PI / 2), yellow), false).position.set(dx, 0.01, -150);
+for (let z = 100; z > -400; z -= 9) for (const dx of [-3.5, 3.5]) add(new THREE.Mesh(new THREE.PlaneGeometry(0.15, 3.2).rotateX(-Math.PI / 2), white), false).position.set(dx, 0.01, z);
+
+// ---- buildings
+const night = SHOT === 'night';
+for (const sx of [-1, 1]) {
+  // left: shops/apartments 3-9 floors; right: low houses (2-4 floors) behind a yard, with gaps
+  let z = 40;
+  while (z > -360) {
+    if (sx > 0 && z < 14 && z > -22) { z = -22; continue; }                 // open lot next to the player
+    const width = 14 + rnd() * 16, depth = 14 + rnd() * 12;
+    const floors = sx > 0 ? 2 + Math.floor(rnd() * 3) : 3 + Math.floor(rnd() * (rnd() < 0.3 ? 7 : 4));
+    const height = floors * 3.6;
+    const setback = sx > 0 ? 17 : 12.5;
+    const color = PALETTE[Math.floor(rnd() * PALETTE.length)];
+    const tex = facade(color, floors, Math.max(3, Math.round(width / 3.4)), night);
+    const roof = lambert({ color: 0x6d6a66 });
+    const wall = lambert({ map: tex.map, emissive: night ? 0xffffff : 0x000000, emissiveMap: night ? tex.emi : null, emissiveIntensity: night ? 0.9 : 0 });
+    const back = lambert({ color: 0x8c857b });
+    // BoxGeometry groups: +x, -x, +y, -y, +z, -z. The street side gets the facade.
+    const b = add(new THREE.Mesh(new THREE.BoxGeometry(depth, height, width),
+      sx > 0 ? [back, wall, roof, roof, wall, wall] : [wall, back, roof, roof, wall, wall]));
+    b.position.set(sx * (setback + depth / 2), height / 2, z - width / 2);
+    if (rnd() < 0.6) add(new THREE.Mesh(new THREE.BoxGeometry(3, 2, 3), lambert({ color: 0x8a8a86 }))).position.set(b.position.x + (rnd() - 0.5) * depth * 0.5, height + 1, b.position.z + (rnd() - 0.5) * width * 0.5);
+    z -= width + (sx > 0 ? 6 + rnd() * 14 : 2 + rnd() * 6);
+  }
+}
+// a few towers far down the street (downtown skyline)
+for (let i = 0; i < 6; i++) {
+  const h = 60 + rnd() * 70, w = 20 + rnd() * 14;
+  const tex = facade(PALETTE[Math.floor(rnd() * PALETTE.length)], 18, 7, night);
+  const m = lambert({ map: tex.map, emissive: night ? 0xffffff : 0x000000, emissiveMap: night ? tex.emi : null, emissiveIntensity: night ? 0.9 : 0 });
+  add(new THREE.Mesh(new THREE.BoxGeometry(w, h, w), m)).position.set((i % 2 ? 1 : -1) * (30 + rnd() * 30), h / 2, -380 - i * 35);
+}
+// bus stop + bins on the right sidewalk (small casters near the camera)
+{
+  const metal = lambert({ color: 0x5b6066 }), glassM = lambert({ color: 0x9fb6c4, transparent: true, opacity: 0.35 });
+  const roofB = add(new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.12, 4.2), metal)); roofB.position.set(11.1, 2.55, -14);
+  for (const dz of [-1.9, 1.9]) add(new THREE.Mesh(new THREE.BoxGeometry(0.08, 2.4, 0.08), metal)).position.set(11.7, 1.38, -14 + dz);
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.04, 1.6, 3.8), glassM), false).position.set(11.75, 1.2, -14);
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.45, 2.6), lambert({ color: 0x7a5b3a }))).position.set(11.3, 0.45, -14);
+  for (const z of [-5, -24]) add(new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.27, 0.95, 12), lambert({ color: 0x2f4f3a }))).position.set(11.6, 0.65, z);
+}
+// front yards / parking on the right
+add(new THREE.Mesh(new THREE.PlaneGeometry(5, 520).rotateX(-Math.PI / 2), lambert({ map: sidewalk })), false).position.set(14.5, 0.02, -150);
+
+// ---- palm trees (alpha-tested casters, like leaves in GTA)
+const trunkMat = lambert({ color: 0x7a6248 });
+const leafMat = lambert({ map: leafTex, alphaTest: 0.5, side: THREE.DoubleSide });
+function palm(x, z, h) {
+  const t = add(new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.3, h, 8), trunkMat));
+  t.position.set(x, h / 2, z);
+  for (let i = 0; i < 11; i++) {
+    // horizontal leaf along +x from the crown, then droop (z) and a small twist (x)
+    const leaf = new THREE.Mesh(new THREE.PlaneGeometry(5.2, 1.3).rotateX(-Math.PI / 2).translate(2.6, 0, 0), leafMat);
+    const pivot = new THREE.Object3D();
+    pivot.position.set(x, h, z);
+    pivot.rotation.y = i / 11 * Math.PI * 2 + rnd() * 0.3;
+    leaf.rotation.z = -0.3 - rnd() * 0.45;
+    leaf.rotation.x = (rnd() - 0.5) * 0.7;
+    leaf.castShadow = true; leaf.receiveShadow = true;
+    pivot.add(leaf); scene.add(pivot);
+    leaf.customDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: leafTex, alphaTest: 0.5 });
+  }
+}
+for (let z = 20; z > -300; z -= 19) { palm(-10.6, z + rnd() * 3, 10 + rnd() * 4); palm(10.6, z - 9 + rnd() * 3, 10 + rnd() * 4); }
+
+// ---- street lamps
+const poleMat = lambert({ color: 0x4a4d50 });
+const lampHeadMat = lambert({ color: 0x2b2b2b, emissive: night ? 0xffd9a0 : 0x000000, emissiveIntensity: night ? 1.0 : 0 });
+const lampLights = [];
+for (let z = 8; z > -260; z -= 32) for (const sx of [-1, 1]) {
+  const x = sx * 7.6;
+  add(new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.12, 7.5, 6), poleMat)).position.set(x, 3.75, z);
+  add(new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.12, 0.12), poleMat)).position.set(x - sx * 0.8, 7.4, z);
+  add(new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.18, 0.35), lampHeadMat), true, false).position.set(x - sx * 1.5, 7.3, z);
+  if (night && z > -140) { const pl = new THREE.PointLight(0xffc98a, 1.5, 24, 2); pl.position.set(x - sx * 1.5, 7.0, z); scene.add(pl); lampLights.push(pl); }
+}
+
+// ---- car (vehicle: specular dims in shadow - Vehicle.shader)
+function car(x, z, color, rotY) {
+  const g = new THREE.Group();
+  const body = phong({ color, shininess: 90, specular: 0x777777 });
+  const glass = phong({ color: 0x1b2430, shininess: 120, specular: 0x999999 });
+  const black = lambert({ color: 0x151515 });
+  const parts = [
+    [new THREE.BoxGeometry(1.9, 0.62, 4.6), body, 0, 0.62, 0],
+    [new THREE.BoxGeometry(1.7, 0.55, 2.3), glass, 0, 1.18, 0.25],
+    [new THREE.BoxGeometry(1.72, 0.08, 2.2), body, 0, 1.47, 0.25],
+  ];
+  for (const [geo, mat, px, py, pz] of parts) { const m = new THREE.Mesh(geo, mat); m.position.set(px, py, pz); m.castShadow = m.receiveShadow = true; g.add(m); }
+  for (const [wx, wz] of [[-0.86, 1.45], [0.86, 1.45], [-0.86, -1.45], [0.86, -1.45]]) {
+    const w = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.26, 14).rotateZ(Math.PI / 2), black);
+    w.position.set(wx, 0.36, wz); w.castShadow = true; g.add(w);
+  }
+  const hl = lambert({ color: 0xfff4d0, emissive: night ? 0xfff4d0 : 0x000000 });
+  for (const hx of [-0.62, 0.62]) { const m = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.14, 0.05), hl); m.position.set(hx, 0.72, -2.31); g.add(m); }
+  g.position.set(x, 0, z); g.rotation.y = rotY; scene.add(g);
+  return g;
+}
+const cars = [car(4.2, -9, 0xa81616, 0), car(-3.6, -34, 0xdedede, Math.PI), car(4.3, -58, 0x1d3f7a, 0.02)];
+
+// ---- player (character: skinned ped in GTA -> Character.shader)
+function ped(x, z, rotY, shirt) {
+  const g = new THREE.Group();
+  const skin = lambert({ color: 0x5b3a26 }), jeans = lambert({ color: 0x2c3e66 }), top = lambert({ color: shirt }), shoe = lambert({ color: 0x111111 });
+  const parts = [
+    [new THREE.BoxGeometry(0.2, 0.86, 0.22), jeans, -0.12, 0.47, 0], [new THREE.BoxGeometry(0.2, 0.86, 0.22), jeans, 0.12, 0.47, 0],
+    [new THREE.BoxGeometry(0.24, 0.08, 0.32), shoe, -0.12, 0.04, -0.04], [new THREE.BoxGeometry(0.24, 0.08, 0.32), shoe, 0.12, 0.04, -0.04],
+    [new THREE.BoxGeometry(0.54, 0.62, 0.3), top, 0, 1.2, 0],
+    [new THREE.BoxGeometry(0.13, 0.62, 0.14), skin, -0.36, 1.18, 0], [new THREE.BoxGeometry(0.13, 0.62, 0.14), skin, 0.36, 1.18, 0],
+    [new THREE.SphereGeometry(0.15, 14, 10), skin, 0, 1.68, 0], [new THREE.SphereGeometry(0.152, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2), shoe, 0, 1.7, 0],
+  ];
+  for (const [geo, mat, px, py, pz] of parts) { const m = new THREE.Mesh(geo, mat); m.position.set(px, py, pz); m.castShadow = m.receiveShadow = true; g.add(m); }
+  g.position.set(x, 0.18, z); g.rotation.y = rotY; scene.add(g);
+  return g;
+}
+const peds = [ped(9.0, -2.0, Math.PI * 0.95, 0xf2f2ee), ped(-9.4, -21, 0.3, 0x2f6b3a), ped(10.2, -27, 2.6, 0x8a2f2f)];
+
+// ---- GTA blob shadows (hidden while the sun shadow replaces them)
+const blobMat = new THREE.MeshBasicMaterial({ map: blobTex, transparent: true, depthWrite: false });
+function blob(obj, sx, sz) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(sx, sz).rotateX(-Math.PI / 2), blobMat);
+  m.position.set(obj.position.x, obj.position.y + 0.02, obj.position.z);
+  m.rotation.y = obj.rotation.y; m.visible = !replaceBlobs; scene.add(m);
+}
+cars.forEach(c => blob(c, 2.6, 5.4));
+peds.forEach(p => blob(p, 1.0, 1.0));
+
+// ---- rain streaks (GTA's own rain particles)
+if (SHOT === 'rain') {
+  const pts = [];
+  for (let i = 0; i < 5000; i++) {
+    const x = (rnd() - 0.5) * 60, y = rnd() * 25, z = -rnd() * 80 + 6;
+    pts.push(x, y, z, x + 0.05, y - 0.9, z);
+  }
+  const geo = new THREE.BufferGeometry(); geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+  scene.add(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0xc8d2da, transparent: true, opacity: 0.35 })));
+}
+
+// ---- camera per shot
+const camera = new THREE.PerspectiveCamera(SHOT === 'sunset' ? 58 : 62, W / H, 0.3, 1500);
+if (SHOT === 'sunset') {
+  camera.position.set(6.6, 3.1, 7.5);
+  camera.lookAt(4.0, 2.2, -14);
+} else {
+  camera.position.set(6.6, 3.1, 7.5);
+  camera.lookAt(7.4, 1.7, -14);
+}
+
+// ---- labels
+const titles = {
+  noon: 'Siang 12:00', sunset: 'Sore / Sunset 18:20', night: 'Malam 23:00', rain: 'Hujan 14:00', cascade: 'Debug showCascade (12:00)'
+};
+const subs = {
+  eagle: castsShadows ? `EAGLE: bayangan matahari CSM 3 cascade, kekuatan ${sunStrength.toFixed(2)}${replaceBlobs ? '' : ' (blob GTA tetap)'}` :
+                        'EAGLE: matahari di bawah horizon -> tanpa bayangan matahari (blob GTA tetap)',
+  gta: 'GTA asli: tanpa bayangan matahari, hanya blob di bawah mobil/ped',
+};
+document.querySelector('#label .title').innerHTML = (MODE === 'eagle' ? '<b>EAGLE</b> ' : 'GTA asli ') + '&middot; ' + titles[SHOT];
+document.querySelector('#label .sub').textContent = SHOT === 'cascade' ? 'merah < 17.6 m < hijau < 48.9 m < biru < 160 m (split CSM)' : subs[MODE];
+if (P.nolabel) document.getElementById('label').style.display = 'none';
+
+camera.updateMatrixWorld();
+SGU.uSGSunView.value.copy(toSun).transformDirection(camera.matrixWorldInverse);
+renderer.render(scene, camera);
+window.__done = true;
+</script>
+</body>
+</html>

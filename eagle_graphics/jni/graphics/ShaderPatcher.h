@@ -8,7 +8,10 @@
 // text:
 //   VS: world position, view depth, world normal (+ direct sun term for lit
 //       shaders) as varyings.
-//   PS: world_shadow.glsl before main(), SG_Apply(fcolor) before spec/fog.
+//   PS: the receiver snippet before main(), SG_InitUser(); SG_Apply(fcolor);
+//       before spec/fog. The snippet is glShader/Entity/Building.shader,
+//       Vehicle.shader or Character.shader (with their #includes), chosen per
+//       shader by Classify().
 // Only 3D world shaders are touched (they carry Out_FogAmt and ViewPos);
 // HUD/2D/sphere-map shaders are left alone.
 //
@@ -45,7 +48,16 @@ struct PatchOptions {
     bool water = false;
 };
 
+enum class ReceiverEntity : int { Building = 0, Vehicle = 1, Character = 2 };
+
+// Sanitized receiver snippets (GlShader::BuildReceiver output), one per entity class.
+struct ReceiverSnippets {
+    std::string snippet[3];
+    const std::string& For(ReceiverEntity e) const { return snippet[static_cast<int>(e)]; }
+};
+
 struct PatchInfo {
+    ReceiverEntity entity = ReceiverEntity::Building;
     bool lit = false;
     bool alpha = false;
     bool hardwareCompare = false;
@@ -58,16 +70,22 @@ public:
     enum class Mode { Disabled, Caster, Receive };
     using BuildFn = bool (*)(void* es2Shader, const char* ps, const char* vs);
 
-    // Game thread (startup/reload). 'snippet' = world_shadow.glsl text (may be empty -> embedded).
+    // Game thread (startup/reload) or the Java thread (settings request); thread-safe.
+    // Each snippet must pass ValidateSnippet(); an empty one leaves that entity unpatched.
     static void Configure(bool enabled, bool allowHardwareCompare, int pcfLevel, bool blend, bool water,
-                          const std::string& snippet);
+                          const ReceiverSnippets& snippets);
     static bool Enabled();
 
     // Pure text transformation (host-testable). Returns false if the shader is
     // not a world shader or cannot be patched safely.
-    static bool PatchSources(const std::string& ps, const std::string& vs, const std::string& snippet,
+    static bool PatchSources(const std::string& ps, const std::string& vs, const ReceiverSnippets& snippets,
                              const PatchOptions& options, std::string& outPs, std::string& outVs, PatchInfo& info);
-    static const char* EmbeddedSnippet();
+    // Skinned -> Character, lit with specular -> Vehicle, everything else -> Building.
+    static ReceiverEntity Classify(const std::string& ps, const std::string& vs);
+    static const char* EntityName(ReceiverEntity e);
+    // Contract of a receiver snippet (after SanitizeSnippet): SG_Apply, SG_SpecVis,
+    // SG_InitUser and every statement below the CheckCompile buffer limit.
+    static bool ValidateSnippet(const std::string& clean, std::string& why);
     static std::string SanitizeSnippet(const std::string& text);
     static size_t MaxStatementLength(const std::string& source);
 

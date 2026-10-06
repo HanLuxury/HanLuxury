@@ -74,7 +74,7 @@ void GraphicsLog::Init(const char* path) {
     g_written = 0;
     g_capped = false;
     if (!g_file) {
-        __android_log_print(ANDROID_LOG_WARN, "EagleGFX", "graphics.log unavailable (%s): %s",
+        __android_log_print(ANDROID_LOG_WARN, "EagleGFX", "logOutput.log unavailable (%s): %s",
                             path, std::strerror(errno));
     }
 }

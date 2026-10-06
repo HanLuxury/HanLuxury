@@ -1,6 +1,12 @@
 #include "TimeCycleFX.h"
+#include "GraphicsLog.h"
 
+#include <cctype>
+#include <cerrno>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
 
 namespace gfx {
 namespace {
@@ -65,7 +71,13 @@ const char* TimeOfDayState::DominantName() const {
     return name;
 }
 
-TimeCycleFX::TimeCycleFX() {
+TimeCycleFX::TimeCycleFX() { ResetProfiles(); }
+
+void TimeCycleFX::ResetProfiles() {
+    m_ramps[0] = 5.0f;
+    m_ramps[1] = 7.0f;
+    m_ramps[2] = 16.0f;
+    m_ramps[3] = 19.0f;
     LookProfile& sunrise = m_profiles[0];
     sunrise.sunColor = {1.00f, 0.74f, 0.50f};
     sunrise.sunIntensity = 0.85f;
@@ -109,11 +121,11 @@ TimeOfDayState TimeCycleFX::Evaluate(float hour, const WeatherSnapshot& weather)
     hour = std::fmod(std::fmax(hour, 0.0f), 24.0f);
     s.hour = hour;
 
-    // Piecewise cross-fades: night->sunrise @5, sunrise->day @7, day->sunset @16, sunset->night @19.
-    const float toSunrise = Ramp(hour, 5.0f);
-    const float toDay = Ramp(hour, 7.0f);
-    const float toSunset = Ramp(hour, 16.0f);
-    const float toNight = Ramp(hour, 19.0f);
+    // Piecewise cross-fades (defaults): night->sunrise @5, sunrise->day @7, day->sunset @16, sunset->night @19.
+    const float toSunrise = Ramp(hour, m_ramps[0]);
+    const float toDay = Ramp(hour, m_ramps[1]);
+    const float toSunset = Ramp(hour, m_ramps[2]);
+    const float toNight = Ramp(hour, m_ramps[3]);
     s.wSunrise = toSunrise * (1.0f - toDay);
     s.wDay = toDay * (1.0f - toSunset);
     s.wSunset = toSunset * (1.0f - toNight);
@@ -149,6 +161,96 @@ TimeOfDayState TimeCycleFX::Evaluate(float hour, const WeatherSnapshot& weather)
     s.look.shadowStrength *= fogLoss;
     s.look.sunIntensity *= fogLoss;
     return s;
+}
+
+// ------------------------------------------------------- eagle_timecyc.dat
+
+int TimeCycleFX::ParseProfiles(const std::string& text, std::string& error) {
+    static const char* const kNames[4] = {"SUNRISE", "DAY", "SUNSET", "NIGHT"};
+    constexpr size_t kColumns = 17;
+    int applied = 0;
+    size_t pos = 0;
+    int lineNo = 0;
+    while (pos < text.size()) {
+        size_t end = text.find('\n', pos);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(pos, end - pos);
+        pos = end + 1;
+        ++lineNo;
+        const size_t comment = line.find("//");
+        if (comment != std::string::npos) line.erase(comment);
+        std::vector<std::string> w;
+        for (size_t i = 0; i < line.size();) {
+            while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+            const size_t b = i;
+            while (i < line.size() && !std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+            if (i > b) w.emplace_back(line, b, i - b);
+        }
+        if (w.empty() || w[0][0] == '#' || w[0][0] == ';') continue;
+        std::string name = w[0];
+        for (char& c : name) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        std::vector<float> v;
+        bool numbersOk = true;
+        for (size_t i = 1; i < w.size(); ++i) {
+            errno = 0;
+            char* e = nullptr;
+            const float f = std::strtof(w[i].c_str(), &e);
+            if (errno != 0 || !e || *e != '\0' || !std::isfinite(f)) { numbersOk = false; break; }
+            v.push_back(f);
+        }
+        const std::string where = "line " + std::to_string(lineNo) + " (" + name + ")";
+        if (!numbersOk) { error += where + ": not a number; "; continue; }
+        if (name == "RAMPS") {
+            if (v.size() != 4 || !(v[0] >= 0.5f && v[0] < v[1] && v[1] < v[2] && v[2] < v[3] && v[3] <= 23.5f)) {
+                error += where + ": needs 4 increasing hours between 0.5 and 23.5; ";
+                continue;
+            }
+            for (int i = 0; i < 4; ++i) m_ramps[i] = v[i];
+            ++applied;
+            continue;
+        }
+        int index = -1;
+        for (int i = 0; i < 4; ++i)
+            if (name == kNames[i]) index = i;
+        if (index < 0) { error += where + ": unknown period; "; continue; }
+        if (v.size() != kColumns) { error += where + ": needs " + std::to_string(kColumns) + " numbers; "; continue; }
+        auto c01 = [](float x, float hi) { return x < 0.0f ? 0.0f : (x > hi ? hi : x); };
+        LookProfile p;
+        p.sunColor = {c01(v[0], 4.0f), c01(v[1], 4.0f), c01(v[2], 4.0f)};
+        p.sunIntensity = c01(v[3], 4.0f);
+        p.shadowStrength = c01(v[4], 1.5f);
+        p.shadowTint = {c01(v[5], 1.0f), c01(v[6], 1.0f), c01(v[7], 1.0f)};
+        p.sunBoost = c01(v[8], 4.0f);
+        p.exposure = c01(v[9], 4.0f);
+        p.saturation = c01(v[10], 2.0f);
+        p.contrast = c01(v[11], 2.0f);
+        p.bloomScale = c01(v[12], 4.0f);
+        p.fogTint = {c01(v[13], 1.0f), c01(v[14], 1.0f), c01(v[15], 1.0f)};
+        p.fogDensity = c01(v[16], 4.0f);
+        m_profiles[index] = p;
+        ++applied;
+    }
+    return applied;
+}
+
+bool TimeCycleFX::LoadProfiles(const char* path) {
+    ResetProfiles();
+    FILE* f = path ? std::fopen(path, "rb") : nullptr;
+    if (!f) {
+        GFX_LOGW("TimeCycleFX", "%s not found, built-in time-of-day looks", path ? path : "(null)");
+        return false;
+    }
+    std::string text;
+    char chunk[4096];
+    size_t n;
+    while ((n = std::fread(chunk, 1, sizeof(chunk), f)) > 0 && text.size() < 64 * 1024) text.append(chunk, n);
+    std::fclose(f);
+    std::string error;
+    const int rows = ParseProfiles(text, error);
+    if (!error.empty()) GFX_LOGW("TimeCycleFX", "%s: %s", path, error.c_str());
+    GFX_LOGI("TimeCycleFX", "loaded %s (%d rows, ramps %.1f/%.1f/%.1f/%.1f h)", path, rows, m_ramps[0], m_ramps[1],
+             m_ramps[2], m_ramps[3]);
+    return true;
 }
 
 } // namespace gfx

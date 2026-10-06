@@ -1,16 +1,28 @@
-// EAGLE world shadow receiver (GLSL ES 1.00 fragment snippet).
-// Injected by ShaderPatcher into GTA's own world pixel shaders, right before
-// "void main()". The engine prepends these defines:
-//   SG_HW    1 = sampler2DShadow (GL_EXT_shadow_samplers), 0 = manual compare
-//   SG_TAPS  1, 4 or 9 PCF taps
-//   SG_BLEND 1 = blend band between cascades
-//   SG_LIT   1 = GTA lit shader (peds/vehicles/objects), SG_vDirect available
-//   SG_ALPHA 1 = alpha-tested shader (leaves/fences) -> caster alpha cutoff
-// Contract: must define  void SG_Apply(inout lowp vec4 color)  and the global
-// SG_SpecVis. Keep every statement shorter than ~400 characters (GTA prints
-// failing shaders statement-by-statement into a 520-byte stack buffer).
-// Comments are stripped before injection. Changes need a game restart
-// (GTA compiles its shaders once).
+// =====================================================================
+//  EAGLE Graphics - glShader/realtimeShadow.shader
+//  Penerima bayangan matahari: pilih cascade + PCF.
+//  Di-#include oleh Entity/Building.shader, Vehicle.shader, Character.shader.
+//
+//  Kode ini DISUNTIKKAN ke shader dunia milik GTA (GLSL ES 1.00), tepat
+//  sebelum "void main()". Engine menambahkan define:
+//    SG_HW    1 = sampler2DShadow (GL_EXT_shadow_samplers), 0 = compare manual
+//    SG_TAPS  1, 4 atau 9 tap PCF
+//    SG_BLEND 1 = band blend antar cascade
+//    SG_LIT   1 = shader GTA ber-lighting (ped/kendaraan/objek), SG_vDirect ada
+//    SG_ALPHA 1 = shader alpha-test (daun/pagar)
+//
+//  Aturan:
+//   - Setiap statement < 400 karakter (GTA mencetak shader yang gagal per
+//     statement ke buffer 520 byte).
+//   - Parameter @ hanya boleh dipakai di dalam fungsi (diisi oleh
+//     SG_InitUser() di awal main).
+//   - GTA mengompilasi shader sekali saat start: ubah file ini = restart game.
+//     Nilai @ di shaderUniform.ini berubah LANGSUNG (tanpa restart).
+// =====================================================================
+<frag>
+@float Shadow_Strength < class = "Shadow", name = "Strength", default = 1.0; min = 0.0; max = 1.5; step = 0.05; >
+@float Shadow_Softness < class = "Shadow", name = "Softness", default = 1.0; min = 0.25; max = 3.0; step = 0.05; >
+
 #if SG_HW
 uniform mediump sampler2DShadow SG_ShadowMap;
 #else
@@ -34,9 +46,11 @@ varying lowp vec3 SG_vDirect;
 #endif
 highp float SG_SpecVis;
 
-// SG_Cfg   : x = 1/atlas width, y = 1/atlas height, z = fade start, w = fade end (view depth, m)
-// SG_Bias  : x = normal offset (texels), y = blend band (fraction), z = PCF spread (texels), w = caster alpha cutoff
-// SG_Light : xyz = direction to the sun, w > 0 receive strength, 0 = off, < 0 = caster pass
+// SG_Cfg   : x = 1/lebar atlas, y = 1/tinggi atlas, z = awal fade, w = akhir fade (kedalaman view, meter)
+// SG_Bias  : x = normal offset (texel), y = band blend (fraksi), z = jarak tap PCF (texel), w = alpha cutoff caster
+// SG_Light : xyz = arah ke matahari, w > 0 kekuatan bayangan, 0 = mati, < 0 = pass caster
+// SG_Tint  : rgb = warna di bayangan penuh, a = porsi cahaya matahari pada warna prelit
+// SG_Boost : rgb = tambahan cahaya matahari, a = 1 debug warna cascade
 
 highp float SG_Cmp(highp vec2 uv, highp float z) {
 #if SG_HW
@@ -48,7 +62,7 @@ highp float SG_Cmp(highp vec2 uv, highp float z) {
 
 highp float SG_Pcf(highp vec4 tile, highp vec3 c, highp float bias) {
     highp float z = min(c.z - bias, 1.0);
-    highp vec2 o = SG_Cfg.xy * SG_Bias.z;
+    highp vec2 o = SG_Cfg.xy * (SG_Bias.z * Shadow_Softness);
 #if SG_TAPS == 1
     return SG_Cmp(clamp(c.xy, tile.xy, tile.zw), z);
 #elif SG_TAPS == 4
@@ -74,6 +88,7 @@ highp float SG_C1(mediump vec3 n) { return SG_Pcf(SG_Tile[1], (SG_VP[1] * vec4(S
 highp float SG_C2(mediump vec3 n) { return SG_Pcf(SG_Tile[2], (SG_VP[2] * vec4(SG_vWorld + n * (SG_Bias.x * SG_Texel.z), 1.0)).xyz, SG_DBias.z); }
 highp float SG_C3(mediump vec3 n) { return SG_Pcf(SG_Tile[3], (SG_VP[3] * vec4(SG_vWorld + n * (SG_Bias.x * SG_Texel.w), 1.0)).xyz, SG_DBias.w); }
 
+// Cascade dipilih dari kedalaman view; band blend menghaluskan pergantian cascade.
 highp float SG_Visibility(mediump vec3 n) {
     highp float d = SG_vDepth;
     if (d >= SG_Cfg.w) return 1.0;
@@ -102,17 +117,10 @@ highp float SG_Visibility(mediump vec3 n) {
     return mix(v, 1.0, smoothstep(SG_Cfg.z, SG_Cfg.w, d));
 }
 
-void SG_Apply(inout lowp vec4 color) {
-    SG_SpecVis = 1.0;
-    if (SG_Light.w < 0.0) {
-#if SG_ALPHA
-        if (color.a < SG_Bias.w) discard;
-#endif
-        return;
-    }
-    if (SG_Light.w <= 0.0) return;
+// Visibilitas matahari piksel ini (0 = bayangan penuh) dan N.L ke arah matahari.
+highp float SG_SunVisibility(out mediump float nl) {
     mediump vec3 n = SG_vNormal;
-    mediump float nl = 1.0;
+    nl = 1.0;
     mediump float len2 = dot(n, n);
     if (len2 > 0.01) {
         n *= inversesqrt(len2);
@@ -120,19 +128,22 @@ void SG_Apply(inout lowp vec4 color) {
     } else {
         n = vec3(0.0);
     }
-    highp float vis = min(SG_Visibility(n), smoothstep(-0.03, 0.22, nl));
-    SG_SpecVis = vis;
-#if SG_LIT
-    mediump float share = clamp(dot(SG_vDirect, vec3(0.3333)) / max(dot(Out_Color.rgb, vec3(0.3333)), 0.04), 0.0, 1.0);
-#else
-    mediump float share = SG_Tint.a;
-#endif
-    mediump float sh = (1.0 - vis) * SG_Light.w * share;
-    color.rgb *= mix(vec3(1.0), SG_Tint.rgb, sh);
-    color.rgb *= vec3(1.0) + SG_Boost.rgb * (vis * max(nl, 0.0));
-    if (SG_Boost.a > 0.5) {
-        highp float d = SG_vDepth;
-        mediump vec3 cc = d < SG_Split.x ? vec3(1.0, 0.35, 0.35) : (d < SG_Split.y ? vec3(0.35, 1.0, 0.35) : (d < SG_Split.z ? vec3(0.35, 0.45, 1.0) : vec3(1.0, 1.0, 0.35)));
-        color.rgb = mix(color.rgb, cc * (0.35 + 0.65 * vis), 0.5);
-    }
+    return min(SG_Visibility(n), smoothstep(-0.03, 0.22, nl));
 }
+
+// Porsi cahaya piksel ini yang berasal dari matahari (shader lit tahu persis).
+mediump float SG_SunShare() {
+#if SG_LIT
+    return clamp(dot(SG_vDirect, vec3(0.3333)) / max(dot(Out_Color.rgb, vec3(0.3333)), 0.04), 0.0, 1.0);
+#else
+    return SG_Tint.a;
+#endif
+}
+
+// Gelapkan sesuai bayangan, tambahkan cahaya matahari di bagian yang terkena.
+void SG_Shade(inout lowp vec4 color, highp float vis, mediump float nl, mediump float strength, mediump float boost) {
+    mediump float sh = clamp((1.0 - vis) * SG_Light.w * SG_SunShare() * strength * Shadow_Strength, 0.0, 1.0);
+    color.rgb *= mix(vec3(1.0), SG_Tint.rgb, sh);
+    color.rgb *= vec3(1.0) + SG_Boost.rgb * (vis * max(nl, 0.0) * boost);
+}
+</frag>
