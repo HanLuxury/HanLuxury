@@ -1,0 +1,89 @@
+PERBAIKAN GRAFIS (TAHAP 1) - GTA SA Android 2.10 arm64, SA-MP, TANPA AML
+=========================================================================
+Ini perbaikan pada sistem grafis YANG SUDAH ADA di source Anda
+(graphics/postfx, graphics/sun, game/Shadow, menu GRAFIS). Tidak ada engine
+kedua, tidak ada menu baru, tidak ada resource Android baru.
+
+CARA PASANG
+-----------
+1. C++: salin isi jni/ ke folder jni project (timpa). File baru:
+   graphics/RenderThread.*, graphics/GraphicsSettings.* (ikut ter-build
+   otomatis oleh CMake GLOB_RECURSE / find di Android.mk).
+   Atau: cd jni && git apply ../graphics_fix/patches/jni.patch
+2. Kotlin: salin java/ ke folder java project (timpa 4 file).
+   Atau: git apply patches/java.patch
+3. Build seperti biasa. AML tidak dibutuhkan lagi untuk grafis.
+
+PENYEBAB FLICKER YANG DITEMUKAN (sudah diperbaiki)
+---------------------------------------------------
+1. Bayangan statis digambar 2x per frame (Shadows.cpp RenderStaticShadows
+   mengabaikan flag pass). Tiang/lampu jadi 2x gelap/terang, berubah saat
+   kamera bergerak. -> dibuat sama dengan fungsi asli GTA.
+2. Bayangan NPC berkedip hitam saat jarak kamera melewati 15/32 m
+   (StoreRealTimeShadow asli menghitung strength negatif). -> wrapper bool.
+3. Hook DoShadowThisFrame membuang gate asli: semua NPC rebutan 40 slot
+   bayangan, bayangan muncul-hilang saat kamera berputar. -> gate dipulihkan.
+4. Lampu mobil: lompatan terang 25% di 26 m dan hilang di 35 m. -> fade halus.
+5. Slot bayangan penuh oleh lampu jalan/neon -> bayangan player berkedip.
+   -> 8 slot dicadangkan.
+6. First-person di mobil: near clip 0.01 -> jalan/marka z-fighting. -> 0.1.
+7. Slider Resolusi di menu membuat ulang render target setiap geser ->
+   layar berkedip. -> diterapkan saat jari dilepas.
+8. PostFX + bayangan matahari (EglPostFX/WorldSunShadow) TIDAK PERNAH jalan
+   di arm64: dipanggil dari game thread (tanpa EGL context), data
+   thread_local, dan butuh AML. -> sekarang dijalankan di render thread GTA
+   lewat RenderQueue (command 47), hook memakai ShadowHook milik client.
+9. Di WorldSunShadow lama: satu draw "aneh" mematikan bayangan satu frame
+   penuh, batas 1800 draw -> on/off. -> hanya draw itu yang dilewati;
+   arah matahari distabilkan (dead-zone 0.3 derajat), PCF hardware,
+   bias normal/slope, depth asli disalin (bukan digambar ulang).
+
+FITUR (memakai sistem yang ada)
+-------------------------------
+- Sinar matahari / god rays: sudah ada (light_shafts). Sekarang terhalang
+  gedung/pohon/kendaraan (pakai depth), ikut posisi matahari GTA, tidak
+  membuat layar putih (soft clamp).
+- Langit realtime: warna langit + glow matahari dari jam + cuaca GTA.
+  (Skybox objek SA-MP lama tetap mati seperti aslinya.)
+- Jalan basah saat hujan: gelap, genangan, pantulan, riak hujan.
+- Grafis ikut cuaca realtime: cerah/berawan/hujan/kabut/badai pasir,
+  transisi halus.
+- Rumput: CPlantMgr::Update dipanggil lagi (sebelumnya tidak pernah).
+- Awan bergerak lagi (CClouds::Update).
+
+MENU GRAFIS (tab GRAFIS yang sama)
+---------------------------------
+Baru di bawah "GRAFIS KLIEN": Preset (Rendah/Sedang/Tinggi/Ultra/Kustom),
+Post FX, Bayangan matahari, Resolusi bayangan, Jarak bayangan, Bayangan
+lembut, Ambient occlusion, Refleksi layar, Sinar matahari, Bloom, Langit
+realtime, Jalan basah, Grafis ikut cuaca, Kabut, Rumput, Simpan, Reset.
+Juga: Kepadatan populasi (MS_Traffic). Subtitle pindah ke tab AUDIO.
+Disimpan di /storage/emulated/0/TESTLIT/SAMP/settings.ini bagian [graphics]
+(otomatis 0.8 detik setelah diubah, dan saat tombol Simpan / keluar game).
+
+TIDAK ADA DI SOURCE (jujur)
+---------------------------
+FXAA/MSAA, VSync, Motion Blur (dimatikan RET oleh client), DOF, Anisotropic,
+Texture Quality. Belum dibuat di tahap ini.
+
+STATUS PENGECEKAN
+-----------------
+- 13 file C++ lolos syntax-check aarch64 (clang, -Wall). Error main.cpp
+  mcontext_t hanya dari header host x86, sama dengan file asli.
+- 14 shader GLSL lolos glslang + 10 pasangan link.
+- Kotlin menu lolos kotlinc 1.9 (error HudLayoutEditor.kt:67 sudah ada di
+  file asli, tidak diubah).
+- BELUM dites di HP dan belum di-build dengan NDK. Tolong tes, lalu kirim
+  logcat dengan tag: GfxRenderThread, WorldSunShadow, EglPostFX.
+  Baris yang dicari:
+    "render-thread bridge ready"
+    "SUN4 native draw replay installed (ShadowHook)"
+    "SUN4 world depth copied"
+    "SUN4 world shadows rendered"
+    "Scene boundary: depth=world copy"
+
+BELUM DIKERJAKAN (tahap berikut)
+--------------------------------
+- Polygon offset bayangan GTA (SHD-09), raster 16px bayangan NPC (SHD-04),
+  culling bayangan RT di tepi layar (SHD-05).
+- Mipmap PowerVR, FPS limiter (selalu 60), layout menu cutout/notch.
