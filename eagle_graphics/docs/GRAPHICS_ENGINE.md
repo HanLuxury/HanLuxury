@@ -17,10 +17,10 @@ belum: lihat bagian akhir.
 |---|---|
 | [IMPLEMENTED] | Log (`logOutput.log`), parser `Config.ini` + `Advanced.ini` (format SDX: `bEnabled = 1`, `[[Grup]`), preset LOW/MEDIUM/HIGH/ULTRA, deteksi GPU, GL state backup |
 | [IMPLEMENTED] | `glShader/*.shader` (format `<vert>`/`<frag>`, `#include "x";`, parameter `@float/@int/@bool`), salinan bawaan di library bila file hilang/rusak |
-| [IMPLEMENTED] | `shaderUniform.ini`: nilai shader yang berubah LANGSUNG tanpa restart (uniform `SG_User[8]`), disimpan kembali dari tab Grafis |
+| [IMPLEMENTED] | `shaderUniform.ini`: nilai shader yang berubah LANGSUNG tanpa restart (uniform `SG_User[8]`), disimpan kembali dari tab EFEK di pause menu |
 | [IMPLEMENTED] | Receiver per entitas: `Entity/Building.shader`, `Vehicle.shader`, `Character.shader` (klasifikasi: skinning → Character, lit+specular → Vehicle, sisanya → Building) |
 | [IMPLEMENTED] | `data/eagle_timecyc.dat`: 4 tampilan waktu + jam transisi bisa diedit |
-| [IMPLEMENTED] | Java: tab **Grafis** di `DialogClientSettings` (aktif, bayangan, kualitas, jarak, debug, menu shader uniform), pilihan pemain disimpan & diterapkan lagi saat start |
+| [IMPLEMENTED] | Pause menu GTA (`ModernPauseMenu`) bergaya battle‑royale: rail tab kiri, chip pilihan, slider kuning, hint bar. Tab GRAFIS = GTA + EAGLE, tab EFEK = shaderUniform.ini/debug/berkas. Tanpa resource baru. Pilihan pemain disimpan & diterapkan lagi saat start |
 | [IMPLEMENTED] | Bridge RenderQueue (command slot 47 + observer `rqSelectShader`), divalidasi terhadap symbol sebelum patch |
 | [IMPLEMENTED] | SunManager: arah dari `CTimeCycle` GTA, clamp elevasi, dead‑zone anti‑shimmer, fade horizon/cuaca/interior |
 | [IMPLEMENTED] | TimeCycleFX: SUNRISE/DAY/SUNSET/NIGHT + hujan/awan/kabut, cross‑fade halus |
@@ -204,16 +204,29 @@ ShowRaster → eglSwapBuffers
   (auto‑scan sudah mengambil `graphics/`).
 
 ### Java — `android/` (diff: `patches/java_files.patch`, susunan sama dengan `new_java.zip`)
+Project Java ini **tidak boleh menambah resource** (`res/values/public.xml` mengunci ID; resource baru
+pernah membuat DuelsHud crash, lihat komentar di `ModernUi.kt`). Karena itu semua tampilan dibuat
+dari kode dan `res/` tidak diubah sama sekali.
 * Baru `java/com/holy/game/core/GraphicsNative.java` — deklarasi JNI + simpan/terapkan pilihan pemain
   (SharedPreferences lewat `Storage`, kunci `eagle_gfx_*`).
-* Baru `java/com/holy/game/core/DialogClientSettingsGraphicsFragment.java` + `res/layout/dialog_settings_graphics.xml`
-  — tab **Grafis**: Grafis EAGLE, Bayangan matahari, Kualitas (LOW..ULTRA), Jarak bayangan (40–300 m),
-  debug cascade/shadow map, "Muat ulang Config.ini", status engine, dan baris **Shader Uniform** yang
-  dibuat dari `shaderUniform.ini` (geser = langsung terlihat, lepas = disimpan ke file).
-* `DialogClientSettings.java`: tab "Grafis" ditambahkan; tombol reset di tab Grafis memakai
-  `resetToConfigFile()` (TIDAK memanggil `onSettingsWindowDefaults`, yang menulis ulang settings.ini).
+* Baru `java/com/holy/game/gui/modern/MenuStyle.kt` — warna, panel sudut terpotong
+  (`CutCornerDrawable`), slider kuning (`SliderView`), font yang sudah ada (bebas_bold, akrobat_bold,
+  gilroy, din_pro).
+* `java/com/holy/game/gui/modern/ModernPauseMenu.kt` — ditulis ulang, API & alur native sama
+  (`ModernMenu` tidak berubah):
+  * bar atas: server, nama, jam, ID/skor/ping, uang, tombol ✕; rail kiri: PETA, GAME, GRAFIS, EFEK,
+    AUDIO, KONTROL + tombol kuning LANJUTKAN; panel kanan: baris dengan chip pilihan / slider / aksi;
+    hint bar menjelaskan baris yang dipilih.
+  * GRAFIS: semua pengaturan GTA sebelumnya + bagian **BAYANGAN MATAHARI • EAGLE** (Grafis EAGLE,
+    Bayangan matahari, Kualitas Rendah/Sedang/Tinggi/Ultra, Jarak 40–300 m).
+  * EFEK: nilai `shaderUniform.ini` dengan label Indonesia (geser = langsung terlihat, lepas = disimpan
+    ke file), DEBUG (warna cascade, shadow map), BERKAS (muat ulang Config.ini, reset efek, status).
+  * Bila `libmultiplayer.so` belum berisi EAGLE, bagian EAGLE menampilkan "EAGLE tidak tersedia"
+    (tidak crash).
 * `Samp.kt`: `GraphicsNative.applySavedSettings()` tepat setelah `initSAMP(...)`, sebelum GTA membuat
   shader, sehingga "bayangan aktif" dari pemain sudah ikut saat shader dunia dikompilasi.
+* `DialogClientSettings.java` **tidak** diubah (tab Grafis versi XML dari paket sebelumnya dihapus karena
+  menambah layout/ID baru).
 
 `graphics/postfx/*` dan `graphics/sun/*` (jalur lama berbasis AML) **tidak lagi dipanggil**;
 masih ikut terkompilasi tapi inert. Boleh dihapus setelah engine baru teruji.
@@ -249,7 +262,7 @@ Format `.shader`:
 
 Beda dengan SA_DOX (disengaja, sesuai batasan proyek): tidak ada `data/script/*.x` (itu sistem
 skrip ala CLEO), tidak mengganti shader GTA secara utuh (receiver disuntik ke shader GTA asli,
-caster memakai shader GTA sendiri), tidak ada `.assets/` (menu ada di tab Grafis Java). Tidak ada
+caster memakai shader GTA sendiri), tidak ada `.assets/` (menu ada di pause menu Java, tab GRAFIS/EFEK). Tidak ada
 kode/tekstur SA_DOX yang disalin; hanya susunan & format berkasnya yang diikuti.
 `graphics.ini` versi pertama masih dibaca bila `Config.ini` dan `Advanced.ini` tidak ada.
 
@@ -307,7 +320,7 @@ dikuantisasi 5% + dead‑zone arah matahari (`[Sun] fUpdateThreshold` di Advance
    ```
 3. Debug cepat: `showShadowMap=1` (atlas kiri bawah: siluet gelap gedung/pohon/ped/mobil),
    `showCascade=1` (merah/hijau/biru), `perfCounters=1` (ms CPU + jumlah caster) — di `Advanced.ini`
-   atau langsung dari tab Grafis.
+   atau langsung dari pause menu (tab EFEK → DEBUG).
 4. Jika ada error compile shader: `[ShaderPatch] world.frag (patched): ...` di log, game tetap
    jalan dengan shader asli (tanpa bayangan pada material itu).
 5. Jika atlas terisi (overlay benar) tetapi dunia tidak menerima bayangan dan tidak ada baris
@@ -324,7 +337,8 @@ dunia GTA dalam 12 kombinasi (hardware/manual compare × 1/4/9 tap × blend), la
 `Advanced.ini` (format SDX), `shaderUniform.ini` (baca → set → simpan → baca), `eagle_timecyc.dat`;
 klasifikasi entitas (gedung/ped/kendaraan/pohon). Uji unit matematika CSM sebelumnya (split
 17.6/48.9/160 m, snapping texel). Semua file engine lolos syntax‑check aarch64‑android C++20 dengan
-`-Wall -Wextra`. Java: `javac` lolos dengan stub Android; 19 deklarasi `native` cocok dengan 19 fungsi
+`-Wall -Wextra`. Kotlin: `ModernPauseMenu.kt` + `MenuStyle.kt` + file modern menu yang ada lolos kotlinc 1.9
+(mode K1 dan K2) terhadap framework Android 11 (Robolectric android‑all). Java: `javac` lolos; 19 deklarasi `native` cocok dengan 19 fungsi
 JNI C++ (dicek dengan `javac -h`).
 
 ---
@@ -345,12 +359,15 @@ JNI C++ (dicek dengan `javac -h`).
 
 ---
 
-## 10. Contoh gambar (simulasi)
+## 10. Contoh gambar (simulasi) dan mockup menu
 `docs/preview/*.jpg` dibuat dengan `docs/preview/simulasi.html` (three.js r128): kota contoh,
 arah matahari dari rumus GTA (`CalcColoursForPoint`), nilai `Config.ini`/`eagle_timecyc.dat`, dan
 rumus `SG_Shade` yang sama dengan `realtimeShadow.shader` diterapkan di atas warna "GTA" sebelum
 fog. **Ini simulasi di browser, bukan screenshot game** — hasil di perangkat tergantung model,
 tekstur dan timecyc GTA. Buka file HTML dengan `#shot=noon|sunset|night|rain|cascade&mode=eagle|gta`.
+
+`docs/preview/menu_*.jpg` adalah **mockup HTML** pause menu (warna, ukuran dp dan font sama dengan
+`MenuStyle.kt`, layar 914×411 dp), bukan screenshot dari HP.
 
 ---
 

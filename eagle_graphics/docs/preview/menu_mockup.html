@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Menu Mockup</title>
+<!-- Mockup HTML pause menu (MenuStyle.kt). Font: salin bebas_bold.ttf, akrobat_bold.otf,
+     gilroy_semibold.ttf, gilroy_bold.ttf, din_pro_bold.ttf dari res/font project ke folder ini.
+     Buka dengan #grafis, #efek atau #game. -->
+<style>
+  @font-face { font-family: Bebas; src: url(bebas_bold.ttf); }
+  @font-face { font-family: Akrobat; src: url(akrobat_bold.otf); }
+  @font-face { font-family: GilroySemi; src: url(gilroy_semibold.ttf); }
+  @font-face { font-family: GilroyBold; src: url(gilroy_bold.ttf); }
+  @font-face { font-family: Din; src: url(din_pro_bold.ttf); }
+  :root {
+    --accent: #F2C230; --on-accent: #161616; --dim: #9AA3AF; --faint: rgba(255,255,255,.5);
+    --panel: rgba(19,23,30,.78); --panel-dark: rgba(11,14,18,.88); --row: rgba(32,38,47,.6);
+    --row-sel: rgba(43,50,61,.9); --chip: rgba(39,45,55,.95); --line: rgba(255,255,255,.2);
+    --money: #7ED957; --danger: #FF5C5C;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 914px; height: 411px; overflow: hidden; background: #000; color: #fff; }
+  .game { position: absolute; inset: 0; background: url(03_EAGLE_siang_12-00.jpg) center/cover; }
+  .scrim { position: absolute; inset: 0; background: linear-gradient(rgba(7,9,13,.95), rgba(16,20,26,.85), rgba(10,12,16,.92)); }
+  .cut { clip-path: polygon(var(--c,6px) 0, 100% 0, 100% calc(100% - var(--c,6px)), calc(100% - var(--c,6px)) 100%, 0 100%, 0 var(--c,6px)); }
+  .frame { position: absolute; inset: 0; padding: 8px 20px 12px; display: flex; flex-direction: column; }
+  .top { height: 46px; display: flex; align-items: center; }
+  .top .mark { width: 6px; height: 30px; background: var(--accent); --c: 3px; }
+  .top .server { flex: 1; margin-left: 10px; font: 28px Bebas; letter-spacing: .04em; text-shadow: 0 0 4px #000; white-space: nowrap; }
+  .top .player { text-align: right; margin-right: 12px; }
+  .top .player .name { font: 14px GilroyBold; }
+  .top .player .line { font: 11px GilroySemi; color: var(--dim); }
+  .top .player .stats { margin-left: 10px; }
+  .top .player .money { color: var(--money); font-family: GilroyBold; margin-left: 10px; }
+  .top .close { width: 40px; height: 40px; background: var(--line); --c: 6px; position: relative; }
+  .top .close::after { content: "✕"; position: absolute; inset: 1px; background: var(--panel-dark); display: grid; place-items: center; font: bold 18px sans-serif;
+    clip-path: polygon(6px 0, 100% 0, 100% calc(100% - 6px), calc(100% - 6px) 100%, 0 100%, 0 6px); }
+  .under { height: 3px; margin-top: 4px; position: relative; }
+  .under::before { content: ""; position: absolute; left: 0; right: 0; top: 1px; height: 1px; background: var(--line); }
+  .under::after { content: ""; position: absolute; left: 0; width: 120px; top: .5px; height: 2px; background: var(--accent); }
+  .body { flex: 1; display: flex; margin-top: 10px; min-height: 0; }
+  .rail { width: 168px; display: flex; flex-direction: column; }
+  .tabs { flex: 1; }
+  .tab { height: 36px; margin-bottom: 2px; display: flex; align-items: center; }
+  .tab .bar { width: 4px; height: 100%; }
+  .tab .glyph { width: 34px; text-align: center; font: bold 15px sans-serif; color: var(--dim); }
+  .tab .t { font: 16px Akrobat; letter-spacing: .06em; color: rgba(255,255,255,.85); }
+  .tab.sel { background: linear-gradient(90deg, rgba(242,194,48,.35), transparent); }
+  .tab.sel .bar { background: var(--accent); } .tab.sel .t, .tab.sel .glyph { color: var(--accent); }
+  .card { margin-top: 8px; padding: 8px 10px; background: var(--panel-dark); --c: 8px; }
+  .card .n { font: 13px GilroyBold; } .card .s { font: 11px GilroySemi; color: var(--dim); line-height: 1.35; margin-top: 3px; white-space: pre; }
+  .resume { margin-top: 8px; height: 42px; background: var(--accent); color: var(--on-accent); --c: 10px; display: grid; place-items: center; font: 17px Bebas; letter-spacing: .08em; }
+  .content { flex: 1; margin-left: 12px; background: var(--panel); --c: 12px; padding: 8px 14px 10px; display: flex; flex-direction: column; min-width: 0; }
+  .ptitle { display: flex; align-items: flex-end; }
+  .ptitle .h { font: 24px Bebas; letter-spacing: .05em; line-height: 1; }
+  .ptitle .sub { font: 11px GilroySemi; color: var(--dim); padding: 0 0 3px 10px; }
+  .rows { flex: 1; overflow: hidden; margin-top: 4px; -webkit-mask-image: linear-gradient(#000 88%, transparent); }
+  .rows .inner { transform: translateY(var(--scroll, 0)); }
+  .section { display: flex; align-items: center; padding: 10px 0 2px; margin-bottom: 3px; }
+  .section .b { width: 3px; height: 14px; background: var(--accent); }
+  .section .t { font: 15px Bebas; letter-spacing: .08em; margin-left: 8px; }
+  .section .l { flex: 1; height: 1px; background: var(--line); margin-left: 10px; }
+  .row { height: 42px; margin-bottom: 3px; display: flex; align-items: center; background: var(--row); --c: 6px; padding-right: 6px; }
+  .row.sel { background: var(--row-sel); }
+  .row .b { width: 3px; height: 100%; } .row.sel .b { background: var(--accent); }
+  .row .lab { flex: 1; font: 14px GilroySemi; padding: 0 6px 0 10px; color: rgba(255,255,255,.9); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row.sel .lab { color: #fff; } .row.danger .lab { color: var(--danger); }
+  .chip { height: 30px; min-width: 62px; padding: 0 8px; margin-left: 5px; display: grid; place-items: center; font: 12px GilroyBold; color: rgba(255,255,255,.85);
+          background: var(--chip); --c: 5px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); }
+  .chip.on { background: var(--accent); color: var(--on-accent); box-shadow: none; }
+  .slider { width: 190px; height: 100%; position: relative; }
+  .slider .track { position: absolute; left: 8px; right: 8px; top: 50%; height: 4px; margin-top: -2px; border-radius: 2px; background: rgba(255,255,255,.28); }
+  .slider .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--accent); }
+  .slider .thumb { position: absolute; top: 50%; width: 16px; height: 16px; margin: -8px 0 0 -8px; border-radius: 50%; background: #fff; box-shadow: inset 0 0 0 2.5px var(--accent); }
+  .val { width: 58px; height: 28px; margin: 0 8px; display: grid; place-items: center; font: 12px Din; color: var(--accent); background: var(--panel-dark); --c: 4px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.18); }
+  .arrow { width: 34px; text-align: center; font: bold 22px sans-serif; color: var(--faint); } .row.sel .arrow { color: var(--accent); }
+  .hint { margin-top: 8px; padding: 6px 10px; background: var(--panel-dark); --c: 6px; display: flex; align-items: center; }
+  .hint .i { width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: var(--on-accent); display: grid; place-items: center; font: 12px GilroyBold; flex: none; }
+  .hint .tx { margin-left: 10px; min-width: 0; }
+  .hint .ht { font: 12px GilroyBold; color: var(--accent); }
+  .hint .hb { font: 11px GilroySemi; color: rgba(255,255,255,.85); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stamp { position: absolute; right: 8px; bottom: 2px; font: 9px GilroySemi; color: rgba(255,255,255,.55); }
+</style>
+</head>
+<body>
+<div class="game"></div><div class="scrim"></div>
+<div class="frame">
+  <div class="top">
+    <div class="mark cut"></div><div class="server">EAGLE ROLEPLAY</div>
+    <div class="player"><div class="name">Han_Luxury</div><div class="line">SENIN 14:32<span class="stats">ID 12  •  Skor 87  •  Ping 38 ms</span><span class="money">$1.250.000</span></div></div>
+    <div class="close cut"></div>
+  </div>
+  <div class="under"></div>
+  <div class="body">
+    <div class="rail">
+      <div class="tabs" id="tabs"></div>
+      <div class="resume cut">LANJUTKAN</div>
+    </div>
+    <div class="content cut">
+      <div class="ptitle"><div class="h" id="ptitle"></div><div class="sub" id="psub"></div></div>
+      <div class="rows"><div class="inner" id="rows"></div></div>
+      <div class="hint cut"><div class="i">i</div><div class="tx"><div class="ht" id="ht"></div><div class="hb" id="hb"></div></div></div>
+    </div>
+  </div>
+</div>
+<div class="stamp">MOCKUP desain (HTML) - bukan screenshot game</div>
+<script>
+const TABS = [["◎","PETA"],["▶","GAME"],["◆","GRAFIS"],["✦","EFEK"],["♪","AUDIO"],["✥","KONTROL"]];
+const SUB = { GAME: "Permainan", GRAFIS: "GTA SA  •  EAGLE", EFEK: "shaderUniform.ini  •  langsung aktif" };
+const ON_OFF = ["Mati", "Nyala"];
+const S = (t) => ({ section: t });
+const C = (l, opts, i, d) => ({ label: l, chips: opts, on: i, desc: d });
+const R = (l, f, v, d) => ({ label: l, slider: f, value: v, desc: d });
+const A = (l, d, danger) => ({ label: l, action: true, desc: d, danger });
+const SCREENS = {
+  grafis: { tab: "GRAFIS", scroll: -390, sel: "Kualitas bayangan", rows: [
+    S("GTA SAN ANDREAS"),
+    C("Kualitas visual", ["Rendah","Sedang","Tinggi","Sgt tinggi"], 2),
+    R("Resolusi", .8, "80%"), R("Jarak pandang", .65, "65%"),
+    C("Bayangan GTA", ["Mati","Klasik","Real-time"], 2),
+    C("Refleksi kendaraan", ["Mati","Rendah","Sedang","Tinggi"], 2),
+    R("Kecerahan", .5, "50%"), C("Pembatas frame", ON_OFF, 1), C("Subtitle", ON_OFF, 0),
+    S("BAYANGAN MATAHARI  •  EAGLE"),
+    C("Grafis EAGLE", ON_OFF, 1), C("Bayangan matahari", ON_OFF, 1),
+    C("Kualitas bayangan", ["Rendah","Sedang","Tinggi","Ultra"], 2, "Resolusi, jumlah cascade dan kehalusan tepi. Ultra paling tajam tetapi paling berat. Mengatur ulang jarak."),
+    R("Jarak bayangan", (160-40)/260, "160 m"),
+    A("Efek shader lanjutan", "Kekuatan dan kelembutan bayangan per gedung, kendaraan dan karakter (tab EFEK)."),
+  ]},
+  efek: { tab: "EFEK", scroll: 0, sel: "Kelembutan tepi", rows: [
+    S("BAYANGAN  •  UMUM"),
+    R("Kekuatan bayangan", 1/1.5, "1.00"),
+    R("Kelembutan tepi", (1.35-0.25)/2.75, "1.35", "Lebar tepi lembut bayangan (PCF). Lebih tinggi = lebih halus.  [Shadow / Softness]"),
+    S("GEDUNG & DUNIA"),
+    R("Bayangan gedung & jalan", 1/1.5, "1.00"), R("Sinar matahari gedung", 1/3, "1.00"),
+    S("KENDARAAN"),
+    R("Bayangan kendaraan", .9/1.5, "0.90"), R("Sinar matahari kendaraan", 1/3, "1.00"), R("Kilap di bayangan", .1, "0.10"),
+  ]},
+  game: { tab: "GAME", scroll: 0, sel: "Pengaturan grafis", rows: [
+    A("Lanjutkan"), A("Edit tombol kontrol GTA"), A("Edit radar & chat"),
+    A("Pengaturan grafis", "Kualitas GTA, bayangan matahari EAGLE dan efek shader."),
+    A("Pengaturan klien"), A("Keluar dari game", "", true),
+  ]},
+};
+const sc = SCREENS[(location.hash.slice(1) || "grafis")];
+document.getElementById("tabs").innerHTML = TABS.map(([g,t]) =>
+  `<div class="tab ${t === sc.tab ? "sel" : ""}"><div class="bar"></div><div class="glyph">${g}</div><div class="t">${t}</div></div>`).join("");
+document.getElementById("ptitle").textContent = sc.tab;
+document.getElementById("psub").textContent = SUB[sc.tab];
+let selRow = null;
+document.getElementById("rows").innerHTML = sc.rows.map(r => {
+  if (r.section) return `<div class="section"><div class="b"></div><div class="t">${r.section}</div><div class="l"></div></div>`;
+  const sel = r.label === sc.sel; if (sel) selRow = r;
+  let ctl = "";
+  if (r.chips) ctl = r.chips.map((c, i) => `<div class="chip cut ${i === r.on ? "on" : ""}">${c}</div>`).join("");
+  if (r.slider !== undefined) ctl = `<div class="slider"><div class="track"><div class="fill" style="width:${r.slider*100}%"></div><div class="thumb" style="left:${r.slider*100}%"></div></div></div><div class="val cut">${r.value}</div>`;
+  if (r.action) ctl = `<div class="arrow">›</div>`;
+  return `<div class="row cut ${sel ? "sel" : ""} ${r.danger ? "danger" : ""}"><div class="b"></div><div class="lab">${r.label}</div>${ctl}</div>`;
+}).join("");
+document.getElementById("rows").style.setProperty("--scroll", sc.scroll + "px");
+document.getElementById("ht").textContent = selRow ? selRow.label.toUpperCase() : "";
+document.getElementById("hb").textContent = selRow ? (selRow.desc || "") : "";
+document.fonts.ready.then(() => { window.__done = true; });
+</script>
+</body>
+</html>
