@@ -257,11 +257,17 @@ class ModernPauseMenu(private val activity: Activity) {
         sideTitle = ModernUi.text(ctx, "", 14f, Color.WHITE, "gilroy_bold", bold = true).apply { maxLines = 2 }
         sideInner.addView(sideTitle, LinearLayout.LayoutParams(match, wrap))
         sideBody = ModernUi.text(ctx, "", 12f, Color.argb(0xCC, 255, 255, 255)).apply {
-            maxLines = 8
+            maxLines = 20
             setLineSpacing(dp(2f), 1f)
         }
         sideInner.addView(sideBody, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dpi(6f) })
-        side.addView(sideInner, LinearLayout.LayoutParams(match, wrap))
+        // Scrollable: long descriptions were cut off on 360dp-tall screens.
+        val sideScroll = ScrollView(ctx).apply {
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+        }
+        sideScroll.addView(sideInner, FrameLayout.LayoutParams(match, wrap))
+        side.addView(sideScroll, LinearLayout.LayoutParams(match, wrap))
         listLayout.addView(side, LinearLayout.LayoutParams(0, wrap, 0.4f).apply { marginStart = dpi(8f) })
         frameLayout.addView(listLayout, LinearLayout.LayoutParams(match, 0, 1f).apply { topMargin = dpi(6f) })
 
@@ -281,6 +287,24 @@ class ModernPauseMenu(private val activity: Activity) {
         footer.addView(close, LinearLayout.LayoutParams(wrap, dpi(26f)))
         frameLayout.addView(footer, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dpi(6f) })
         rootLayout.addView(frameLayout, FrameLayout.LayoutParams(match, match))
+        // The activity draws into the display cutout (shortEdges): keep tabs and
+        // rows out of the notch / punch hole and away from the system bars.
+        val basePadding = intArrayOf(dpi(28f), 0, dpi(28f), dpi(10f))
+        frameLayout.setOnApplyWindowInsetsListener { view, insets ->
+            var left = 0
+            var top = 0
+            var right = 0
+            var bottom = 0
+            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                insets.displayCutout?.let {
+                    left = it.safeInsetLeft; top = it.safeInsetTop
+                    right = it.safeInsetRight; bottom = it.safeInsetBottom
+                }
+            }
+            view.setPadding(basePadding[0] + left, basePadding[1] + top,
+                basePadding[2] + right, basePadding[3] + bottom)
+            insets
+        }
 
         close.setOnClickListener { closeMenu() }
         locate.setOnClickListener { ModernMenu.request(ModernMenu.REQUEST_CENTER_PLAYER) }
@@ -479,6 +503,8 @@ class ModernPauseMenu(private val activity: Activity) {
             option(GtaSettings.GFX_PRESET, "Preset grafis",
                 "Mengatur semua pilihan di bawah sekaligus. Berubah ke Kustom bila satu nilai diganti.",
                 listOf("Rendah", "Sedang", "Tinggi", "Ultra", "Kustom")),
+            option(GtaSettings.GFX_FXAA, "Anti-aliasing (FXAA)",
+                "Menghaluskan tepi bergerigi dan kedip tepi tipis pada dunia. HUD tidak ikut diblur.", ON_OFF),
             option(GtaSettings.GFX_POSTFX, "Post FX",
                 "Bloom, tone mapping, warna, kabut dan efek lain setelah dunia digambar. HUD/chat tidak terpengaruh.", ON_OFF),
             option(GtaSettings.GFX_SUN_SHADOWS, "Bayangan matahari",

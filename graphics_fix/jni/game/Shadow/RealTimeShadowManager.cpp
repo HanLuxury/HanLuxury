@@ -6,6 +6,7 @@
 #include "util/patch.h"
 #include "Entity/Ped/Ped.h"
 #include "Mobile/MobileSettings/MobileSettings.h"
+#include "modloader/HookScope.h"
 #include <cstddef>
 
 #if !VER_x32
@@ -77,7 +78,22 @@ inline void DoShadowThisFrame_hook(CRealTimeShadowManager* thiz, CPhysical *phys
     thiz->DoShadowThisFrame(physical);
 }
 
+// Native CRealTimeShadowManager::Init (0x6DC9F0) creates 40 shadows with
+// CRealTimeShadow::Create(class): class 0 -> 512 px (slots 0-3), 1 -> 256 px
+// (4-11), 2 -> 16 px (12-39). Update (0x6DCC78) hands rasters out by camera
+// distance rank every frame, so a visible ped shadow could switch between a
+// sharp shadow and a 16x16 blob while the camera moved. Class 2 now gets the
+// 256 px raster: Update sorts 17..256 px rasters into its medium list from
+// index 4, 8 + 28 = 36 entries in a 40-entry array (verified at 0x6DCC78).
+static bool (*CRealTimeShadow_Create_orig)(CRealTimeShadow*, int32, bool, int32, bool) = nullptr;
+static bool CRealTimeShadow_Create_hook(CRealTimeShadow* shadow, int32 sizeClass, bool blurred, int32 blurPasses, bool moreBlur) {
+    ML_HOOK_SCOPE();
+    if (sizeClass >= 2) sizeClass = 1;
+    return CRealTimeShadow_Create_orig ? CRealTimeShadow_Create_orig(shadow, sizeClass, blurred, blurPasses, moreBlur) : false;
+}
+
 void CRealTimeShadowManager::InjectHooks() {
+    CHook::InlineHook("_ZN15CRealTimeShadow6CreateEibib", &CRealTimeShadow_Create_hook, &CRealTimeShadow_Create_orig);
     CHook::Redirect("_ZN22CRealTimeShadowManager17DoShadowThisFrameEP9CPhysical", &DoShadowThisFrame_hook);
     CHook::Redirect("_ZN22CRealTimeShadowManager20ReturnRealTimeShadowEP15CRealTimeShadow", &ReturnRealTimeShadow_hook);
 }

@@ -34,6 +34,7 @@ struct Settings {
     bool ssao = true;
     bool sourceIsSRGB = true; // Framebuffer LINEAR sering berisi RGB gamma GTA.
     bool weatherLook = true;  // Grading/fog/langit ikut cuaca GTA secara realtime.
+    bool fxaa = true;         // Anti-aliasing FXAA pada gambar dunia (sebelum HUD).
     LookPreset preset = LookPreset::Automatic;
     float exposure = 1.06f;
     float saturation = 1.02f;

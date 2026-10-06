@@ -48,4 +48,5 @@ object GtaSettings {
     const val GFX_WEATHER = GFX_BASE + 12
     const val GFX_FOG = GFX_BASE + 13
     const val GFX_GRASS = GFX_BASE + 14
+    const val GFX_FXAA = GFX_BASE + 15
 }

@@ -24,6 +24,8 @@
 #include "../graphics/GraphicsSettings.h"
 #include "../CSettings.h"
 
+extern void ApplyFPSPatch(uint8_t fps); // game/patches.cpp
+
 namespace {
 
 using ModernState = CModernMenu::eState;
@@ -315,6 +317,10 @@ void ApplySetting(int32_t id, int32_t value) {
         case MS_SFXVolume:
         case MS_MusicVolume:
             if (Menu_ApplyAudioSettings) Menu_ApplyAudioSettings();
+            break;
+        case MS_FrameLimiter:
+            // Native DoGameState store is NOPed by ApplyFPSPatch: apply here.
+            ApplyFPSPatch(static_cast<uint8_t>(std::clamp(CSettings::m_Settings.iFPS, 20, 255)));
             break;
         default:
             // Everything else is read by the game every frame.

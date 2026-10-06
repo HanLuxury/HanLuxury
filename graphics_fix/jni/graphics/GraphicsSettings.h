@@ -27,6 +27,7 @@ enum Id : int32_t {
     WEATHER_LOOK,      // grading/fog follow the weather in realtime
     FOG,               // percent
     GRASS,             // procedural grass/plants follow the camera
+    FXAA,              // anti-aliasing in the post-processing composite
     COUNT
 };
 // Menu setting ids: GTA's MobileSettings use 0..MS_MAX-1 (37); these start here.

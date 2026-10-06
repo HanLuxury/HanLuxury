@@ -178,7 +178,7 @@ enum Uniform { Source,Texel,Decode,Extract,ThresholdKnee,Direction,Scene,Depth,
     AOParams,Bloom0,Bloom1,Bloom2,Effects,Dirt,HasDepth,Encode,Grade,BloomDirt,
     EffectSize,LightCount,LightPosition,LightColor,Time,Aspect,Detail,ShadowTint,
     HighlightTint,Fog,Sun,Atmosphere,InvView,SunDirection,SkyZenith,SkyHorizon,SunColor,
-    Wet,DepthTexel,UniformCount };
+    Wet,DepthTexel,FXAA,UniformCount };
 constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract",
     "uThresholdKnee","uDirection","uScene","uDepth","uProjection","uInvProjection",
     "uDepthRange","uClearDepth","uForwardSign","uSSR","uAO","uSSRParams","uAOParams",
@@ -186,7 +186,7 @@ constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract
     "uGrade","uBloomDirt","uEffectSize","uLightCount","uLightPosition[0]",
     "uLightColor[0]","uTime","uAspect","uDetail","uShadowTint","uHighlightTint",
     "uFog","uSun","uAtmosphere","uInvView","uSunDirection","uSkyZenith","uSkyHorizon",
-    "uSunColor","uWet","uDepthTexel"};
+    "uSunColor","uWet","uDepthTexel","uFXAA"};
 static_assert(sizeof(uniformNames)/sizeof(uniformNames[0])==UniformCount);
 struct Program {
     GLuint id=0;GLint location[UniformCount]{};
@@ -505,6 +505,7 @@ void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,i
     glUniform4fv(p[SunColor],1,world ? look.sunColor : zero);
     glUniform4fv(p[Wet],1,world ? look.wet : zero);
     glUniform2f(p[DepthTexel],1.0f/float(std::max(dw,1)),1.0f/float(std::max(dh,1)));
+    glUniform1i(p[FXAA],cfg.fxaa ? 1 : 0);
     float positions[16]{},colors[16]{};
     for(int i=0;i<cfg.lightCount;++i) {
         const auto& l=cfg.lights[static_cast<size_t>(i)];

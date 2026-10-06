@@ -148,6 +148,23 @@ index 96c2809..71ade2e 100644
      if (modelIndex == 581 || modelIndex == 509 || modelIndex == 481 || modelIndex == 462 || modelIndex == 521 || modelIndex == 463 || modelIndex == 510 ||
          modelIndex == 522 || modelIndex == 461 || modelIndex == 468 || modelIndex == 448 || modelIndex == 586)
      {
+diff --git a/game/CRenderTarget.cpp b/game/CRenderTarget.cpp
+index 3a65163..3bd564b 100644
+--- a/game/CRenderTarget.cpp
++++ b/game/CRenderTarget.cpp
+@@ -102,6 +102,12 @@ void CRenderTarget::PostProcessCamera()
+ 
+ 		RpWorldRemoveLight(Scene.m_pRpWorld, m_pLight);
+ 	}
++	// PreProcessCamera switched the visibility plugins to the plate/snapshot
++	// camera at (0,0,50). Native CMirrors::RenderReflections runs before the
++	// scene camera is set again, so car reflections computed LOD/fade from the
++	// world origin for that frame (reflections blinked). Put the scene back.
++	if (Scene.m_pRwCamera)
++		CVisibilityPlugins::SetRenderWareCamera(Scene.m_pRwCamera);
+ }
+ 
+ void CRenderTarget::Initialise()
 diff --git a/game/Entity/Entity.cpp b/game/Entity/Entity.cpp
 index a63e6d8..3772df3 100644
 --- a/game/Entity/Entity.cpp
@@ -180,15 +197,16 @@ index 309dbe7..09efcc5 100644
      CVector Pos = CModelInfo::ms_modelInfoPtrs[veh->m_nModelIndex]->m_pColModel->m_boundBox.m_vecMin;
      CVector center  = veh->TransformFromObjectSpace(CVector(0.0f, 0.0f, 0.0f));
 diff --git a/game/Shadow/RealTimeShadowManager.cpp b/game/Shadow/RealTimeShadowManager.cpp
-index e69e15d..4cd513d 100644
+index e69e15d..1388a90 100644
 --- a/game/Shadow/RealTimeShadowManager.cpp
 +++ b/game/Shadow/RealTimeShadowManager.cpp
-@@ -4,6 +4,14 @@
+@@ -4,6 +4,15 @@
  
  #include "RealTimeShadowManager.h"
  #include "util/patch.h"
 +#include "Entity/Ped/Ped.h"
 +#include "Mobile/MobileSettings/MobileSettings.h"
++#include "modloader/HookScope.h"
 +#include <cstddef>
 +
 +#if !VER_x32
@@ -198,7 +216,7 @@ index e69e15d..4cd513d 100644
   
  void CRealTimeShadowManager::ReturnRealTimeShadow(CRealTimeShadow *shdw) {
      if (shdw->m_pOwner) {
-@@ -33,6 +41,16 @@ void CRealTimeShadowManager::DoShadowThisFrame(CPhysical* physical) {
+@@ -33,6 +42,16 @@ void CRealTimeShadowManager::DoShadowThisFrame(CPhysical* physical) {
  //            return;
  //    }
  
@@ -215,17 +233,94 @@ index e69e15d..4cd513d 100644
      if (const auto shdw = physical->m_pShadowData) {
          shdw->m_bKeepAlive = true;
      } else {
+@@ -59,7 +78,22 @@ inline void DoShadowThisFrame_hook(CRealTimeShadowManager* thiz, CPhysical *phys
+     thiz->DoShadowThisFrame(physical);
+ }
+ 
++// Native CRealTimeShadowManager::Init (0x6DC9F0) creates 40 shadows with
++// CRealTimeShadow::Create(class): class 0 -> 512 px (slots 0-3), 1 -> 256 px
++// (4-11), 2 -> 16 px (12-39). Update (0x6DCC78) hands rasters out by camera
++// distance rank every frame, so a visible ped shadow could switch between a
++// sharp shadow and a 16x16 blob while the camera moved. Class 2 now gets the
++// 256 px raster: Update sorts 17..256 px rasters into its medium list from
++// index 4, 8 + 28 = 36 entries in a 40-entry array (verified at 0x6DCC78).
++static bool (*CRealTimeShadow_Create_orig)(CRealTimeShadow*, int32, bool, int32, bool) = nullptr;
++static bool CRealTimeShadow_Create_hook(CRealTimeShadow* shadow, int32 sizeClass, bool blurred, int32 blurPasses, bool moreBlur) {
++    ML_HOOK_SCOPE();
++    if (sizeClass >= 2) sizeClass = 1;
++    return CRealTimeShadow_Create_orig ? CRealTimeShadow_Create_orig(shadow, sizeClass, blurred, blurPasses, moreBlur) : false;
++}
++
+ void CRealTimeShadowManager::InjectHooks() {
++    CHook::InlineHook("_ZN15CRealTimeShadow6CreateEibib", &CRealTimeShadow_Create_hook, &CRealTimeShadow_Create_orig);
+     CHook::Redirect("_ZN22CRealTimeShadowManager17DoShadowThisFrameEP9CPhysical", &DoShadowThisFrame_hook);
+     CHook::Redirect("_ZN22CRealTimeShadowManager20ReturnRealTimeShadowEP15CRealTimeShadow", &ReturnRealTimeShadow_hook);
+ }
 diff --git a/game/Shadow/Shadows.cpp b/game/Shadow/Shadows.cpp
-index 5d229b2..0748c5b 100644
+index 5d229b2..1a05cf9 100644
 --- a/game/Shadow/Shadows.cpp
 +++ b/game/Shadow/Shadows.cpp
-@@ -16,8 +16,26 @@
+@@ -16,8 +16,81 @@
  #include "TimeCycle.h"
  #include "Models/ModelInfo.h"
  #include "Mobile/MobileSettings/MobileSettings.h"
 +#include "modloader/HookScope.h"
++#include "graphics/RenderThread.h"
++#include <GLES3/gl3.h>
 +#include <dlfcn.h>
 +#include <cmath>
++
++// Shadow polygons (static, stored, real-time) lie on the ground or on
++// collision triangles and are drawn with a small fixed lift only, so they
++// z-fight with the road while the camera moves. Native Android RenderScene
++// has no depth bias for them. These RenderQueue callbacks run on GTA's render
++// thread around the shadow passes: polygon offset toward the camera, then
++// GTA's own factor/units are put back.
++//
++// GTA keeps a game-thread cache of GL_POLYGON_OFFSET_FILL for decal rasters
++// (HandleDecalZ, raster flag 0x200 -> rqSetZBias): a non-decal draw disables
++// it only when the cache says "on", then clears the cache. HandleDecalZ(0)
++// at both ends of the outer scope keeps that cache and the GL state equal:
++// before the pass GL is off and cache=0 (shadow draws then leave our offset
++// alone), after the pass GL is off again and cache=0.
++namespace {
++GLfloat g_offsetFactor = 0.f, g_offsetUnits = 0.f;
++int g_offsetDepth = 0; // render thread only
++int g_scopeDepth = 0;  // game thread only
++void ShadowDepthBiasOn(void*) {
++    if (g_offsetDepth++ != 0) return;
++    glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &g_offsetFactor);
++    glGetFloatv(GL_POLYGON_OFFSET_UNITS, &g_offsetUnits);
++    glEnable(GL_POLYGON_OFFSET_FILL);
++    glPolygonOffset(-4.f, -8.f);
++}
++void ShadowDepthBiasOff(void*) {
++    if (g_offsetDepth <= 0 || --g_offsetDepth != 0) return;
++    glPolygonOffset(g_offsetFactor, g_offsetUnits);
++    glDisable(GL_POLYGON_OFFSET_FILL);
++}
++void SyncDecalZ() {
++    using HandleDecalZFn = void (*)(uint16_t);
++    static const auto handleDecalZ = reinterpret_cast<HandleDecalZFn>(dlsym(CHook::lib, "_Z12HandleDecalZt"));
++    if (handleDecalZ) handleDecalZ(0);
++}
++// Game thread. On and off are queued in pairs, in order with the shadow draws.
++struct ShadowDepthBiasScope {
++    bool queued = false;
++    ShadowDepthBiasScope() {
++        if (g_scopeDepth++ != 0 || !GraphicsRenderThread::Ready()) return;
++        SyncDecalZ();
++        queued = GraphicsRenderThread::Enqueue(&ShadowDepthBiasOn, nullptr);
++    }
++    ~ShadowDepthBiasScope() {
++        --g_scopeDepth;
++        if (!queued) return;
++        if (!GraphicsRenderThread::Enqueue(&ShadowDepthBiasOff, nullptr))
++            GraphicsRenderThread::Enqueue(&ShadowDepthBiasOff, nullptr);
++        SyncDecalZ();
++    }
++};
++} // namespace
 +
 +// Same split as native CShadows::RenderStaticShadows(bool) (0x6DFC60):
 +// native RenderScene calls this twice per frame, (false) for darkening
@@ -244,10 +339,11 @@ index 5d229b2..0748c5b 100644
  
 -void CShadows::RenderStaticShadows(bool renderAdditive) {
 +void CShadows::RenderStaticShadows(bool renderColoured) {
++    ShadowDepthBiasScope depthBias;
      RwRenderStateSet(rwRENDERSTATEZWRITEENABLE,         RWRSTATE(FALSE));
      RwRenderStateSet(rwRENDERSTATEZTESTENABLE,          RWRSTATE(TRUE));
      RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE,    RWRSTATE(TRUE));
-@@ -32,20 +50,25 @@ void CShadows::RenderStaticShadows(bool renderAdditive) {
+@@ -32,20 +105,25 @@ void CShadows::RenderStaticShadows(bool renderAdditive) {
          shdw.m_bRendered = false;
      }
  
@@ -278,7 +374,7 @@ index 5d229b2..0748c5b 100644
              if (!ishdw.m_pPolyBunch) {
                  continue;
              }
-@@ -55,56 +78,52 @@ void CShadows::RenderStaticShadows(bool renderAdditive) {
+@@ -55,56 +133,52 @@ void CShadows::RenderStaticShadows(bool renderAdditive) {
              if (ishdw.m_pTexture != oshdw.m_pTexture) {
                  continue;
              }
@@ -342,7 +438,9 @@ index 5d229b2..0748c5b 100644
 -                    }
 +                const auto totalNoIdx =
 +                        3 * (poly->m_wNumVerts - 2); // Total no. of indices we'll use
-+
+ 
+-                    // Finish storing
+-                    RenderBuffer::StopStoring();
 +                // 0x708432: Begin render buffer store
 +                RwIm3DVertex *vtxIt{};
 +                RwImVertexIndex *vtxIdxIt{};
@@ -351,9 +449,7 @@ index 5d229b2..0748c5b 100644
 +                        poly->m_wNumVerts,
 +                        vtxIdxIt, vtxIt
 +                );
- 
--                    // Finish storing
--                    RenderBuffer::StopStoring();
++
 +                // 0x70851D: Write vertices (`if` not necessary, it's part of the loop condition)
 +                const auto a = (uint8) ((float) ishdw.m_nIntensity * (1.f - CWeather::Foggyness * 0.5f));
 +                for (auto v{0}; v < poly->m_wNumVerts; v++, vtxIt++) {
@@ -376,7 +472,7 @@ index 5d229b2..0748c5b 100644
              }
          }
  
-@@ -461,7 +480,12 @@ void CShadows::CalcPedShadowValues(CVector sunPosn, float& displacementX, float&
+@@ -461,7 +535,12 @@ void CShadows::CalcPedShadowValues(CVector sunPosn, float& displacementX, float&
  }
  
  void CShadows::StoreCarLightShadow(CVehicle* vehicle, int32 id, RwTexture* texture, CVector* posn, float frontX, float frontY, float sideX, float sideY, uint8 red, uint8 green, uint8 blue, float maxViewAngleCosine) {
@@ -390,7 +486,7 @@ index 5d229b2..0748c5b 100644
  
      // Maximum distance (from camera to `posn`) after which shadows aren't stored (and rendered)
      constexpr auto MAX_CAM_TO_LIGHT_DIST = 35.f;
-@@ -487,9 +511,11 @@ void CShadows::StoreCarLightShadow(CVehicle* vehicle, int32 id, RwTexture* textu
+@@ -487,9 +566,11 @@ void CShadows::StoreCarLightShadow(CVehicle* vehicle, int32 id, RwTexture* textu
              return;
          }
  
@@ -404,7 +500,7 @@ index 5d229b2..0748c5b 100644
              red   = (uint8)((float)red * t);
              green = (uint8)((float)green * t);
              blue  = (uint8)((float)blue * t);
-@@ -720,7 +746,7 @@ void CShadows::UpdateStaticShadows() {
+@@ -720,7 +801,7 @@ void CShadows::UpdateStaticShadows() {
      }
  }
  
@@ -413,7 +509,7 @@ index 5d229b2..0748c5b 100644
      return CHook::CallFunction<bool>(g_libGTASA + (VER_x32 ? 0x005B8D38 + 1 : 0x6DD6A4), id, type, texture, posn, frontX, frontY, sideX, sideY, intensity, red, green, blue, zDistane, scale, drawDistance, temporaryShadow, upDistance);
  }
  
-@@ -789,20 +815,36 @@ void CShadows::StoreRealTimeShadow(CPhysical* physical, float displacementX, flo
+@@ -789,20 +870,45 @@ void CShadows::StoreRealTimeShadow(CPhysical* physical, float displacementX, flo
      );
  }
  
@@ -436,6 +532,15 @@ index 5d229b2..0748c5b 100644
 +// the camera moves a caster across the 15 m / 32 m ring. Same function and
 +// return value (bool, tested by Update at 0x6DCE4C), nothing stored beyond it.
 +static bool (*StoreRealTimeShadow_orig)(CPhysical*, float, float, float, float, float, float) = nullptr;
++
++// Native CShadows::RenderStoredShadows(bool) (blobs, real-time shadows, light
++// pools), wrapped only for the depth bias above.
++static void (*RenderStoredShadows_orig)(bool) = nullptr;
++static void RenderStoredShadows_hook(bool renderColoured) {
++    ML_HOOK_SCOPE();
++    ShadowDepthBiasScope depthBias;
++    if (RenderStoredShadows_orig) RenderStoredShadows_orig(renderColoured);
++}
 +// libGTASA MAX_DISTANCE_PED_SHADOWS (exported), set to 15 or 32 m every frame
 +// by native UpdateStaticShadows depending on MobileSettings[MS_Shadows].
 +static const float* s_maxPedShadowDistance = nullptr;
@@ -463,10 +568,12 @@ index 5d229b2..0748c5b 100644
  }
  
  void CShadows::InjectHooks() {
-@@ -828,6 +870,13 @@ void CShadows::InjectHooks() {
+@@ -828,6 +934,15 @@ void CShadows::InjectHooks() {
  
      CHook::Redirect("_ZN8CShadows19StoreCarLightShadowEP8CVehicleiP9RwTextureP7CVectorffffhhhf", &StoreCarLightShadow);
      CHook::Redirect("_ZN8CShadows19RenderStaticShadowsEb", &RenderStaticShadows);
++
++    CHook::InlineHook("_ZN8CShadows19RenderStoredShadowsEb", &RenderStoredShadows_hook, &RenderStoredShadows_orig);
 +
 +    // Optional: without the exported distance the native function stays as is.
 +    s_maxPedShadowDistance = static_cast<const float*>(dlsym(CHook::lib, "MAX_DISTANCE_PED_SHADOWS"));
@@ -544,12 +651,83 @@ index 1b54f60..c05bfcc 100644
      inline static RwMatrix* m_pWorkingMatrix1;
      inline static RwMatrix* m_pWorkingMatrix2;
  
+diff --git a/game/hooks.cpp b/game/hooks.cpp
+index 317ec3e..30a1d76 100644
+--- a/game/hooks.cpp
++++ b/game/hooks.cpp
+@@ -1673,12 +1673,19 @@ static int32_t CObject_Render_hook_material(CObject* object)
+     // the table, so the common case costs one hash probe instead of a linear
+     // walk over the whole SA-MP object pool per rendered object.
+     CObjectSamp* sampObject = CObjectSamp::FindMaterialObject(object);
+-    if (!sampObject && pNetGame) {
+-        // CObjectPool is a static SA-MP pool in this client; CNetGame does not
+-        // expose a GetObjectPool() member. Resolve directly through the pool.
+-        // This also covers frames where the GTA entity pointer was recreated
+-        // by streaming between Process() and Render().
+-        sampObject = CObjectPool::GetObjectFromGtaPtr(object);
++    if (!sampObject && !CObjectSamp::ms_MaterialObjects.empty()) {
++        // Entity pointer recreated by streaming between Process() and Render():
++        // look only among the objects that carry a custom material. The old
++        // fallback walked the whole SA-MP object pool for EVERY rendered object
++        // without a material (pool x visible objects per frame): frame-time
++        // spikes while turning the camera in heavy maps. Process() re-keys the
++        // table on the next frame.
++        for (const auto& entry : CObjectSamp::ms_MaterialObjects) {
++            if (entry.second && entry.second->m_pEntity == object) {
++                sampObject = entry.second;
++                break;
++            }
++        }
+     }
+     if (!sampObject) {
+         return CObject_Render_orig_material ? CObject_Render_orig_material(object) : 0;
+diff --git a/game/patches.cpp b/game/patches.cpp
+index 1d755bb..2d91cb5 100644
+--- a/game/patches.cpp
++++ b/game/patches.cpp
+@@ -2,6 +2,8 @@
+ #include "common.h"
+    
+ #include "../CSettings.h"
++#include "Mobile/MobileSettings/MobileSettings.h"
++#include <algorithm>
+ #include "..//CDebugInfo.h"
+ #include "game.h"
+ #include "VehicleColoursTable.h"
+@@ -20,10 +22,15 @@ void DisableAutoAim()
+ 	CHook::RET("_ZN4CPed21SetWeaponLockOnTargetEP7CEntity"); // CPed::SetWeaponLockOnTarget
+ }
+ 
+-void ApplyFPSPatch(uint8_t fps)
++void ApplyFPSPatch(uint8_t requested)
+ {
+-    if(fps > CSettings::maxFps)
+-        fps = CSettings::maxFps;
++    // The saved limit (settings.ini gui/fps, client dialog, /fpslimit) and the
++    // GRAFIS "Pembatas frame" row are applied now; before, maxFPS was always 60.
++    // Upper bound: the display rate reported by Java, at least 60.
++    const int cap = std::max(CSettings::maxFps, 60);
++    int fps = std::clamp<int>(requested, 20, cap);
++    if (CMobileSettings::ms_MobileSettings[MS_FrameLimiter].value != 0)
++        fps = std::min(fps, 30); // native DoGameState limiter value
+ 
+ #if VER_x32
+     CHook::NOP(g_libGTASA + 0x005E49F4, 1);
+@@ -34,7 +41,7 @@ void ApplyFPSPatch(uint8_t fps)
+ #endif
+     CGame::PostToMainThread([=]{
+         auto RsGlobal = (RsGlobalType*)(g_libGTASA + (VER_x32 ? 0x009FC8FC : 0xC9B320));
+-        RsGlobal->maxFPS = 60;
++        RsGlobal->maxFPS = fps;
+     });
+ 
+     Log("New fps limit = %d", fps);
 diff --git a/graphics/GraphicsSettings.cpp b/graphics/GraphicsSettings.cpp
 new file mode 100644
-index 0000000..50c925c
+index 0000000..5a42288
 --- /dev/null
 +++ b/graphics/GraphicsSettings.cpp
-@@ -0,0 +1,138 @@
+@@ -0,0 +1,140 @@
 +#include "GraphicsSettings.h"
 +#include "postfx/EglPostFX.h"
 +#include "sun/WorldSunShadow.h"
@@ -583,6 +761,7 @@ index 0000000..50c925c
 +    {"weather_look",      0,   1, {1,   1,   1,   1}},
 +    {"fog",               0, 100, {50, 60,  65,  70}},
 +    {"grass",             0,   1, {0,   1,   1,   1}},
++    {"fxaa",              0,   1, {0,   1,   1,   1}},
 +}};
 +constexpr int32_t kDefaultPreset=1;
 +std::array<int32_t,COUNT> values{};
@@ -653,6 +832,7 @@ index 0000000..50c925c
 +    fx.wetStrength=Percent(WET_ROADS);
 +    fx.weatherLook=values[WEATHER_LOOK]!=0;
 +    fx.fogStrength=Percent(FOG);
++    fx.fxaa=values[FXAA]!=0;
 +    EglPostFX::SetSettings(fx);
 +
 +    WorldSunShadow::Settings sun;
@@ -690,10 +870,10 @@ index 0000000..50c925c
 +} // namespace GraphicsSettings
 diff --git a/graphics/GraphicsSettings.h b/graphics/GraphicsSettings.h
 new file mode 100644
-index 0000000..afa2d62
+index 0000000..12f07da
 --- /dev/null
 +++ b/graphics/GraphicsSettings.h
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,50 @@
 +#pragma once
 +#include <cstdint>
 +
@@ -723,6 +903,7 @@ index 0000000..afa2d62
 +    WEATHER_LOOK,      // grading/fog follow the weather in realtime
 +    FOG,               // percent
 +    GRASS,             // procedural grass/plants follow the camera
++    FXAA,              // anti-aliasing in the post-processing composite
 +    COUNT
 +};
 +// Menu setting ids: GTA's MobileSettings use 0..MS_MAX-1 (37); these start here.
@@ -970,7 +1151,7 @@ index 0000000..a3abd88
 +
 +} // namespace GraphicsRenderThread
 diff --git a/graphics/postfx/EglPostFX.cpp b/graphics/postfx/EglPostFX.cpp
-index 1241bfe..9062e0f 100644
+index 1241bfe..4991fee 100644
 --- a/graphics/postfx/EglPostFX.cpp
 +++ b/graphics/postfx/EglPostFX.cpp
 @@ -3,6 +3,8 @@
@@ -1011,7 +1192,7 @@ index 1241bfe..9062e0f 100644
      EffectSize,LightCount,LightPosition,LightColor,Time,Aspect,Detail,ShadowTint,
 -    HighlightTint,Fog,Sun,Atmosphere,UniformCount };
 +    HighlightTint,Fog,Sun,Atmosphere,InvView,SunDirection,SkyZenith,SkyHorizon,SunColor,
-+    Wet,DepthTexel,UniformCount };
++    Wet,DepthTexel,FXAA,UniformCount };
  constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract",
      "uThresholdKnee","uDirection","uScene","uDepth","uProjection","uInvProjection",
      "uDepthRange","uClearDepth","uForwardSign","uSSR","uAO","uSSRParams","uAOParams",
@@ -1020,7 +1201,7 @@ index 1241bfe..9062e0f 100644
      "uLightColor[0]","uTime","uAspect","uDetail","uShadowTint","uHighlightTint",
 -    "uFog","uSun","uAtmosphere"};
 +    "uFog","uSun","uAtmosphere","uInvView","uSunDirection","uSkyZenith","uSkyHorizon",
-+    "uSunColor","uWet","uDepthTexel"};
++    "uSunColor","uWet","uDepthTexel","uFXAA"};
  static_assert(sizeof(uniformNames)/sizeof(uniformNames[0])==UniformCount);
  struct Program {
      GLuint id=0;GLint location[UniformCount]{};
@@ -1097,7 +1278,7 @@ index 1241bfe..9062e0f 100644
      Texture(7,s.atmosphere.texture);glUniform1i(p[Atmosphere],7);
      glUniform1i(p[Scene],0);glUniform1i(p[Bloom0],1);glUniform1i(p[Bloom1],2);
      glUniform1i(p[Bloom2],3);glUniform1i(p[Effects],4);glUniform1i(p[Depth],5);glUniform1i(p[Dirt],6);
-@@ -464,6 +494,17 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
+@@ -464,6 +494,18 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
      glUniform2f(p[BloomDirt],cfg.bloomStrength,cfg.dirtStrength);
      glUniform2f(p[EffectSize],float(s.effects.width),float(s.effects.height));
      glUniform2fv(p[DepthRange],1,s.depthRange);glUniformMatrix4fv(p[InvProjection],1,GL_FALSE,s.inverse);
@@ -1112,10 +1293,11 @@ index 1241bfe..9062e0f 100644
 +    glUniform4fv(p[SunColor],1,world ? look.sunColor : zero);
 +    glUniform4fv(p[Wet],1,world ? look.wet : zero);
 +    glUniform2f(p[DepthTexel],1.0f/float(std::max(dw,1)),1.0f/float(std::max(dh,1)));
++    glUniform1i(p[FXAA],cfg.fxaa ? 1 : 0);
      float positions[16]{},colors[16]{};
      for(int i=0;i<cfg.lightCount;++i) {
          const auto& l=cfg.lights[static_cast<size_t>(i)];
-@@ -478,6 +519,67 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
+@@ -478,6 +520,67 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
      const GLenum restore=static_cast<GLenum>(oldDraw);glDrawBuffers(1,&restore);
  }
  
@@ -1183,7 +1365,7 @@ index 1241bfe..9062e0f 100644
  bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* suppliedProjection) {
      if(!installed.load() || eglGetCurrentContext()==EGL_NO_CONTEXT ||
         eglGetCurrentDisplay()!=display || eglGetCurrentSurface(EGL_DRAW)!=surface) return false;
-@@ -486,19 +588,30 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -486,19 +589,30 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
      auto state=CurrentState(beforeHud);
      if(!state || state->retiring.load()) return false;
      ContextState& s=*state;
@@ -1222,7 +1404,7 @@ index 1241bfe..9062e0f 100644
      EGLint w=0,h=0;
      if(!eglQuerySurface(display,surface,EGL_WIDTH,&w) || !eglQuerySurface(display,surface,EGL_HEIGHT,&h) || w<2 || h<2) return false;
      if(!s.checked) {
-@@ -507,14 +620,16 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -507,14 +621,16 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
                 s.caps.es3 ? "GLES3 + optional depth" : "GLES2 color compatibility");
      }
      if(!s.caps.es2 || s.failed || (s.caps.es3 && UnsafeDrawState())) return false;
@@ -1244,7 +1426,7 @@ index 1241bfe..9062e0f 100644
              s.reportedFallback=true;
          }
          return false;
-@@ -542,39 +657,58 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -542,39 +658,58 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
         (defaultDraw!=GL_BACK && defaultDraw!=GL_NONE)) return false;
      bool srgb=false;GLenum color=DefaultColor(srgb);if(!color) return false;
      GLint samples=0;glGetIntegerv(GL_SAMPLES,&samples);
@@ -1314,7 +1496,7 @@ index 1241bfe..9062e0f 100644
          s.reportedDepth=true;
      }
      return true;
-@@ -592,26 +726,38 @@ void EndFrame(EGLBoolean result) {
+@@ -592,26 +727,38 @@ void EndFrame(EGLBoolean result) {
      // Gagal swap: stop render sampai context/surface lifecycle berikutnya.
      if(result==EGL_FALSE) s->failed=true;
  }
@@ -1357,7 +1539,7 @@ index 1241bfe..9062e0f 100644
      if(!realMakeCurrent) return EGL_FALSE;
      if(!installed.load()) return realMakeCurrent(d,draw,read,c);
      if(eglGetCurrentContext()!=c || eglGetCurrentDisplay()!=d ||
-@@ -619,6 +765,7 @@ EGLBoolean EGLAPIENTRY HookMakeCurrent(EGLDisplay d,EGLSurface draw,EGLSurface r
+@@ -619,6 +766,7 @@ EGLBoolean EGLAPIENTRY HookMakeCurrent(EGLDisplay d,EGLSurface draw,EGLSurface r
      return realMakeCurrent(d,draw,read,c);
  }
  EGLBoolean EGLAPIENTRY HookDestroyContext(EGLDisplay d,EGLContext c) {
@@ -1365,7 +1547,7 @@ index 1241bfe..9062e0f 100644
      if(!realDestroyContext) return EGL_FALSE;
      if(!installed.load()) return realDestroyContext(d,c);
      if(d==eglGetCurrentDisplay() && c==eglGetCurrentContext()) CleanupCurrent();
-@@ -626,47 +773,34 @@ EGLBoolean EGLAPIENTRY HookDestroyContext(EGLDisplay d,EGLContext c) {
+@@ -626,47 +774,34 @@ EGLBoolean EGLAPIENTRY HookDestroyContext(EGLDisplay d,EGLContext c) {
      return realDestroyContext(d,c);
  }
  EGLBoolean EGLAPIENTRY HookDestroySurface(EGLDisplay d,EGLSurface s) {
@@ -1428,7 +1610,7 @@ index 1241bfe..9062e0f 100644
      return true;
  }
  void* ResolveEgl(void* handle,const char* name) {
-@@ -678,11 +812,23 @@ template<class Function> bool Hook(void* symbol,const char* name,Function replac
+@@ -678,11 +813,23 @@ template<class Function> bool Hook(void* symbol,const char* name,Function replac
      if(!symbol || !backendHook) return false;
      void* hook=backendHook(symbol,reinterpret_cast<void*>(replacement),reinterpret_cast<void**>(&original));
      if(!hook || !original) {
@@ -1453,7 +1635,7 @@ index 1241bfe..9062e0f 100644
  } // namespace
  
  bool InstallHooks() {
-@@ -722,14 +868,12 @@ bool InstallHooks() {
+@@ -722,14 +869,12 @@ bool InstallHooks() {
          if(symbols[6] && !Hook(symbols[6],names[6],&HookDamageKHR,realDamageKHR)) return;
          if(symbols[7]==symbols[6] && realDamageKHR) realDamageEXT=realDamageKHR;
          else if(symbols[7] && !Hook(symbols[7],names[7],&HookDamageEXT,realDamageEXT)) return;
@@ -1470,7 +1652,7 @@ index 1241bfe..9062e0f 100644
      });
      return installed.load();
  }
-@@ -748,14 +892,19 @@ void SetSettings(const Settings& input) {
+@@ -748,14 +893,19 @@ void SetSettings(const Settings& input) {
      c.shadowLift=Clamp(c.shadowLift,0,0.03f,0.008f);c.vignette=Clamp(c.vignette,0,0.25f,0.04f);
      c.sunShafts=Clamp(c.sunShafts,0,0.5f,0.24f);c.lensFlare=Clamp(c.lensFlare,0,0.2f,0.045f);
      c.fogStrength=Clamp(c.fogStrength,0,1,0.65f);
@@ -1492,7 +1674,7 @@ index 1241bfe..9062e0f 100644
  void RenderBeforeHud(const float* projection) {
      if(insideSwap || !installed.load()) return;
      TryRender(eglGetCurrentDisplay(),eglGetCurrentSurface(EGL_DRAW),true,projection);
-@@ -768,4 +917,17 @@ void BindCurrentGameSurface() {
+@@ -768,4 +918,17 @@ void BindCurrentGameSurface() {
          if(s) s->gameSurface=eglGetCurrentSurface(EGL_DRAW);
      } catch(...) { FX_LOG("Unable to register game EGL surface"); }
  }
@@ -1511,7 +1693,7 @@ index 1241bfe..9062e0f 100644
 +}
  } // namespace EglPostFX
 diff --git a/graphics/postfx/EglPostFX.h b/graphics/postfx/EglPostFX.h
-index 333a313..585e98c 100644
+index 333a313..32dbe4b 100644
 --- a/graphics/postfx/EglPostFX.h
 +++ b/graphics/postfx/EglPostFX.h
 @@ -1,12 +1,13 @@
@@ -1541,11 +1723,12 @@ index 333a313..585e98c 100644
  };
  struct ScreenLight {
      float uv[2] = {0.75f, 0.85f}; // UV OpenGL: (0,0) kiri bawah.
-@@ -28,13 +33,14 @@ struct Settings {
+@@ -28,13 +33,15 @@ struct Settings {
      bool ssr = true;       // Hanya aktif bila capture depth + projection valid.
      bool ssao = true;
      bool sourceIsSRGB = true; // Framebuffer LINEAR sering berisi RGB gamma GTA.
 +    bool weatherLook = true;  // Grading/fog/langit ikut cuaca GTA secara realtime.
++    bool fxaa = true;         // Anti-aliasing FXAA pada gambar dunia (sebelum HUD).
      LookPreset preset = LookPreset::Automatic;
      float exposure = 1.06f;
      float saturation = 1.02f;
@@ -1557,7 +1740,7 @@ index 333a313..585e98c 100644
      float bloomKnee = 0.20f;
      float dirtStrength = 0.08f;
      float ssrStrength = 0.32f; // Wet-weather maximum; dry reflection is reduced.
-@@ -42,20 +48,21 @@ struct Settings {
+@@ -42,20 +49,21 @@ struct Settings {
      float ssrThickness = 0.30f;
      float aoStrength = 0.65f;
      float aoRadius = 1.0f;
@@ -1584,7 +1767,7 @@ index 333a313..585e98c 100644
  bool InstallHooks();
  
  // Thread-safe. Tidak melakukan GL call; nilai diambil pada render thread.
-@@ -70,9 +77,13 @@ void BindCurrentGameSurface();
+@@ -70,9 +78,13 @@ void BindCurrentGameSurface();
  
  // Integrasi opsional pada batas scene -> HUD yang SUDAH ada di client.
  // Seluruh GL call tetap berjalan pada thread pemilik current EGLContext.
@@ -1777,7 +1960,7 @@ index 9c72611..83d26a1 100644
  }
  } // namespace EglPostFX
 diff --git a/graphics/postfx/ShaderSources.h b/graphics/postfx/ShaderSources.h
-index f5ee334..b3a2e24 100644
+index f5ee334..35cf1a1 100644
 --- a/graphics/postfx/ShaderSources.h
 +++ b/graphics/postfx/ShaderSources.h
 @@ -1,8 +1,8 @@
@@ -1822,7 +2005,7 @@ index f5ee334..b3a2e24 100644
  }
  )GLSL";
  inline constexpr char kBlur[] = R"GLSL(#version 300 es
-@@ -206,6 +212,14 @@ uniform vec4 uDetail,uFog;
+@@ -206,6 +212,15 @@ uniform vec4 uDetail,uFog;
  uniform vec3 uShadowTint,uHighlightTint;
  uniform vec2 uTexel;
  uniform float uClearDepth;
@@ -1834,10 +2017,11 @@ index f5ee334..b3a2e24 100644
 +uniform vec4 uSunColor;     // rgb, w = sun glow strength
 +uniform vec4 uWet;          // wetness, rain, puddle coverage, reflection boost
 +uniform vec2 uDepthTexel;   // 1 / depth texture size
++uniform int uFXAA;          // 1 = FXAA on the world image (HUD is drawn later)
  vec3 linearRGB(vec3 c) {
      return mix(c/12.92,pow(max((c+0.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(0.04045),c));
  }
-@@ -240,6 +254,42 @@ float viewDepth(vec2 uv) {
+@@ -240,6 +255,42 @@ float viewDepth(vec2 uv) {
      vec4 p=uInvProjection*vec4(uv*2.0-1.0,z,1);
      return abs(p.z/max(abs(p.w),1e-7));
  }
@@ -1880,10 +2064,28 @@ index f5ee334..b3a2e24 100644
  vec4 effects() {
      if(uHasDepth==0) return vec4(0,0,0,1);
      // Depth-aware 4-tap upsample untuk mengurangi halo half-resolution.
-@@ -258,6 +308,39 @@ vec4 effects() {
+@@ -258,17 +309,72 @@ vec4 effects() {
  vec3 scene(vec2 uv) {
      vec3 c=texture(uScene,uv).rgb;return uDecodeSRGB!=0 ? linearRGB(c) : c;
  }
++// FXAA (Lottes, console-style): 5 taps, smooths stair-step edges and thin
++// shimmering geometry without blurring flat areas.
++vec3 fxaaScene(vec2 uv) {
++    vec3 m=scene(uv);
++    vec3 nw=scene(uv+vec2(-1.0,-1.0)*uTexel), ne=scene(uv+vec2(1.0,-1.0)*uTexel);
++    vec3 sw=scene(uv+vec2(-1.0,1.0)*uTexel), se=scene(uv+vec2(1.0,1.0)*uTexel);
++    float lm=luma(m),lnw=luma(nw),lne=luma(ne),lsw=luma(sw),lse=luma(se);
++    float lmin=min(lm,min(min(lnw,lne),min(lsw,lse)));
++    float lmax=max(lm,max(max(lnw,lne),max(lsw,lse)));
++    if(lmax-lmin<max(0.0312,lmax*0.125)) return m;
++    vec2 dir=vec2(-((lnw+lne)-(lsw+lse)),(lnw+lsw)-(lne+lse));
++    float reduce=max((lnw+lne+lsw+lse)*0.03125,1.0/128.0);
++    dir=clamp(dir/(min(abs(dir.x),abs(dir.y))+reduce),vec2(-8.0),vec2(8.0))*uTexel;
++    vec3 a=0.5*(scene(uv+dir*(1.0/3.0-0.5))+scene(uv+dir*(2.0/3.0-0.5)));
++    vec3 b=a*0.5+0.25*(scene(uv-dir*0.5)+scene(uv+dir*0.5));
++    float lb=luma(b);
++    return (lb<lmin||lb>lmax) ? a : b;
++}
 +// Wet asphalt and puddles on flat ground. Returns the reflection multiplier.
 +float wetSurface(inout vec3 c) {
 +    vec3 p=viewPosition(vUV);
@@ -1919,8 +2121,9 @@ index f5ee334..b3a2e24 100644
 +}
  void main() {
      vec4 src=texture(uScene,vUV);
-     vec3 c=uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb;
-@@ -265,10 +348,14 @@ void main() {
+-    vec3 c=uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb;
++    vec3 c=uFXAA!=0 ? fxaaScene(vUV) : (uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb);
+     vec3 local=(scene(vUV+vec2(uTexel.x,0))+scene(vUV-vec2(uTexel.x,0))
          +scene(vUV+vec2(0,uTexel.y))+scene(vUV-vec2(0,uTexel.y)))*0.25;
      c=max(c+clamp((luma(c)-luma(local))*uDetail.x,-0.035,0.035),vec3(0));
      vec4 fx=effects();
@@ -1937,7 +2140,7 @@ index f5ee334..b3a2e24 100644
      }
      vec3 bloom=texture(uBloom0,vUV).rgb*0.50+texture(uBloom1,vUV).rgb*0.30+texture(uBloom2,vUV).rgb*0.20;
      c+=bloom*uBloomDirt.x*(1.0+texture(uDirt,vUV).r*uBloomDirt.y);
-@@ -287,9 +374,11 @@ void main() {
+@@ -287,9 +393,11 @@ void main() {
  )GLSL";
  inline constexpr char kAtmosphere[] = R"GLSL(#version 300 es
  precision highp float;
@@ -1949,7 +2152,7 @@ index f5ee334..b3a2e24 100644
  vec3 linearRGB(vec3 c) {
      return mix(c/12.92,pow(max((c+0.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(0.04045),c));
  }
-@@ -324,31 +413,54 @@ uniform vec2 uTexel;
+@@ -324,31 +432,54 @@ uniform vec2 uTexel;
  uniform vec4 uSun; // sun UV, shaft strength, flare strength.
  uniform float uAspect;
  uniform int uDecodeSRGB;
@@ -2012,7 +2215,7 @@ index f5ee334..b3a2e24 100644
  }
  
  void main() { outColor=vec4(sunEffects(vUV),1); }
-@@ -503,31 +615,54 @@ uniform vec2 uTexel;
+@@ -503,31 +634,54 @@ uniform vec2 uTexel;
  uniform vec4 uSun; // sun UV, shaft strength, flare strength.
  uniform float uAspect;
  uniform int uDecodeSRGB;
@@ -2146,10 +2349,10 @@ index 3ae46d3..67eb2dc 100644
  #include "light_shafts.glsl"
  void main() { outColor=vec4(sunEffects(vUV),1); }
 diff --git a/graphics/postfx/shaders/composite.frag b/graphics/postfx/shaders/composite.frag
-index ec47e77..6bd26d8 100644
+index ec47e77..c2a3f30 100644
 --- a/graphics/postfx/shaders/composite.frag
 +++ b/graphics/postfx/shaders/composite.frag
-@@ -28,12 +28,56 @@ uniform vec4 uDetail,uFog;
+@@ -28,12 +28,57 @@ uniform vec4 uDetail,uFog;
  uniform vec3 uShadowTint,uHighlightTint;
  uniform vec2 uTexel;
  uniform float uClearDepth;
@@ -2161,6 +2364,7 @@ index ec47e77..6bd26d8 100644
 +uniform vec4 uSunColor;     // rgb, w = sun glow strength
 +uniform vec4 uWet;          // wetness, rain, puddle coverage, reflection boost
 +uniform vec2 uDepthTexel;   // 1 / depth texture size
++uniform int uFXAA;          // 1 = FXAA on the world image (HUD is drawn later)
  #include "reference_color.glsl"
  float viewDepth(vec2 uv) {
      float z=(texture(uDepth,uv).r-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
@@ -2206,10 +2410,28 @@ index ec47e77..6bd26d8 100644
  vec4 effects() {
      if(uHasDepth==0) return vec4(0,0,0,1);
      // Depth-aware 4-tap upsample untuk mengurangi halo half-resolution.
-@@ -52,6 +96,39 @@ vec4 effects() {
+@@ -52,17 +97,72 @@ vec4 effects() {
  vec3 scene(vec2 uv) {
      vec3 c=texture(uScene,uv).rgb;return uDecodeSRGB!=0 ? linearRGB(c) : c;
  }
++// FXAA (Lottes, console-style): 5 taps, smooths stair-step edges and thin
++// shimmering geometry without blurring flat areas.
++vec3 fxaaScene(vec2 uv) {
++    vec3 m=scene(uv);
++    vec3 nw=scene(uv+vec2(-1.0,-1.0)*uTexel), ne=scene(uv+vec2(1.0,-1.0)*uTexel);
++    vec3 sw=scene(uv+vec2(-1.0,1.0)*uTexel), se=scene(uv+vec2(1.0,1.0)*uTexel);
++    float lm=luma(m),lnw=luma(nw),lne=luma(ne),lsw=luma(sw),lse=luma(se);
++    float lmin=min(lm,min(min(lnw,lne),min(lsw,lse)));
++    float lmax=max(lm,max(max(lnw,lne),max(lsw,lse)));
++    if(lmax-lmin<max(0.0312,lmax*0.125)) return m;
++    vec2 dir=vec2(-((lnw+lne)-(lsw+lse)),(lnw+lsw)-(lne+lse));
++    float reduce=max((lnw+lne+lsw+lse)*0.03125,1.0/128.0);
++    dir=clamp(dir/(min(abs(dir.x),abs(dir.y))+reduce),vec2(-8.0),vec2(8.0))*uTexel;
++    vec3 a=0.5*(scene(uv+dir*(1.0/3.0-0.5))+scene(uv+dir*(2.0/3.0-0.5)));
++    vec3 b=a*0.5+0.25*(scene(uv-dir*0.5)+scene(uv+dir*0.5));
++    float lb=luma(b);
++    return (lb<lmin||lb>lmax) ? a : b;
++}
 +// Wet asphalt and puddles on flat ground. Returns the reflection multiplier.
 +float wetSurface(inout vec3 c) {
 +    vec3 p=viewPosition(vUV);
@@ -2245,8 +2467,9 @@ index ec47e77..6bd26d8 100644
 +}
  void main() {
      vec4 src=texture(uScene,vUV);
-     vec3 c=uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb;
-@@ -59,10 +136,14 @@ void main() {
+-    vec3 c=uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb;
++    vec3 c=uFXAA!=0 ? fxaaScene(vUV) : (uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb);
+     vec3 local=(scene(vUV+vec2(uTexel.x,0))+scene(vUV-vec2(uTexel.x,0))
          +scene(vUV+vec2(0,uTexel.y))+scene(vUV-vec2(0,uTexel.y)))*0.25;
      c=max(c+clamp((luma(c)-luma(local))*uDetail.x,-0.035,0.035),vec3(0));
      vec4 fx=effects();
@@ -3413,20 +3636,80 @@ index a288acb..f8cf701 100644
 +// Game thread (Render2dStuff): EndWorld() + QueueFrame(next) on the render thread.
 +void SubmitWorldEnd(const Frame& next);
  }
+diff --git a/gui/imgui_impl_renderware.cpp b/gui/imgui_impl_renderware.cpp
+index 6021e91..5f4db6a 100644
+--- a/gui/imgui_impl_renderware.cpp
++++ b/gui/imgui_impl_renderware.cpp
+@@ -3,6 +3,7 @@
+ #include "../game/game.h"
+ 
+ #include "../game/RW/RenderWare.h"
++#include <new>
+ 
+ extern CGUI *pGUI;
+ 
+@@ -17,27 +18,27 @@ ImVec4 g_ScissorRect;
+ 
+ void ImGui_ImplRenderWare_RenderDrawData(ImDrawData* draw_data)
+ {
+-	if (g_VertexBufferSize < MAX_VERTEXS)
++	// Grow to the frame's vertex count. The old buffer was capped at 30000 and
++	// everything after it was silently not drawn: with a long chat plus a
++	// dialog/keyboard, later windows vanished and reappeared (flicker).
++	// +2: the copy loop below stops one vertex before the end.
++	const unsigned int needed = (draw_data->TotalVtxCount > 0 ? (unsigned int)draw_data->TotalVtxCount : 0u) + 2u;
++	if (!g_pVB || g_VertexBufferSize < needed)
+ 	{
+-		if (!g_pVB || g_VertexBufferSize < draw_data->TotalVtxCount)
++		unsigned int size = g_VertexBufferSize > MAX_VERTEXS ? g_VertexBufferSize : MAX_VERTEXS;
++		while (size < needed) size *= 2;
++		delete[] g_pVB;
++		g_pVB = new (std::nothrow) RwIm2DVertex[size];
++		if (!g_pVB)
+ 		{
+-			if (g_pVB) { delete[] g_pVB; g_pVB = nullptr; }
+-			g_VertexBufferSize = MAX_VERTEXS;
+-
+-			if (g_VertexBufferSize >= MAX_VERTEXS)
+-			{
+-				g_VertexBufferSize = MAX_VERTEXS;
+-			}
+-
+-			g_pVB = new RwIm2DVertex[g_VertexBufferSize];
+-			g_pVBEnd = &g_pVB[g_VertexBufferSize];
+-			if (!g_pVB)
+-			{
+-				Log("GUI | Error: couldn't allocate vertex buffer (size: %d)", g_VertexBufferSize);
+-				return;
+-			}
+-			Log("GUI | Vertex buffer reallocated. Size: %d", g_VertexBufferSize);
++			g_VertexBufferSize = 0;
++			g_pVBEnd = nullptr;
++			Log("GUI | Error: couldn't allocate vertex buffer (size: %u)", size);
++			return;
+ 		}
++		g_VertexBufferSize = size;
++		g_pVBEnd = &g_pVB[size];
++		Log("GUI | Vertex buffer reallocated. Size: %u", size);
+ 	}
+ 	RwIm2DVertex* vtx_dst = g_pVB;
+ 	int vtx_offset = 0;
 diff --git a/java_systems/ModernMenu.cpp b/java_systems/ModernMenu.cpp
-index 6ed70ef..04c8eaa 100644
+index 6ed70ef..92b0a46 100644
 --- a/java_systems/ModernMenu.cpp
 +++ b/java_systems/ModernMenu.cpp
-@@ -21,6 +21,8 @@
+@@ -21,6 +21,10 @@
  #include "../game/Mobile/MobileSettings/MobileSettings.h"
  #include "../game/Widgets/TouchInterface.h"
  #include "../game/EntryExitManager.h"
 +#include "../graphics/GraphicsSettings.h"
 +#include "../CSettings.h"
++
++extern void ApplyFPSPatch(uint8_t fps); // game/patches.cpp
  
  namespace {
  
-@@ -44,7 +46,10 @@ int64_t NowMs() {
+@@ -44,7 +48,10 @@ int64_t NowMs() {
  constexpr int REQUEST_QUEUE_SIZE = 128;
  std::atomic<int64_t> g_requests[REQUEST_QUEUE_SIZE];
  std::atomic<uint32_t> g_requestHead{ 0 };
@@ -3438,7 +3721,7 @@ index 6ed70ef..04c8eaa 100644
  
  // Native settings opened from the modern menu.
  bool g_settingsPending = false;   // OnSettings() not called yet
-@@ -271,6 +276,8 @@ void ToggleWaypoint(CMobileMenu* menu) {
+@@ -271,6 +278,8 @@ void ToggleWaypoint(CMobileMenu* menu) {
  }
  
  void SaveSettingsIfDirty() {
@@ -3447,7 +3730,7 @@ index 6ed70ef..04c8eaa 100644
      if (!g_settingsDirty || !Menu_SaveSettings) return;
      g_settingsDirty = false;
      Menu_SaveSettings();
-@@ -286,6 +293,12 @@ void SetState(ModernState state) {
+@@ -286,6 +295,12 @@ void SetState(ModernState state) {
  
  // Same side effects as SelectScreen::SettingSelection::HandleInput.
  void ApplySetting(int32_t id, int32_t value) {
@@ -3460,7 +3743,18 @@ index 6ed70ef..04c8eaa 100644
      if (id < 0 || id >= MS_MAX) return;
      MobileSettings& setting = CMobileSettings::ms_MobileSettings[id];
      if (!setting.visible || setting.max <= setting.min) return;
-@@ -340,6 +353,10 @@ bool CModernMenu::OnInitForPause(CMobileMenu* menu) {
+@@ -303,6 +318,10 @@ void ApplySetting(int32_t id, int32_t value) {
+         case MS_MusicVolume:
+             if (Menu_ApplyAudioSettings) Menu_ApplyAudioSettings();
+             break;
++        case MS_FrameLimiter:
++            // Native DoGameState store is NOPed by ApplyFPSPatch: apply here.
++            ApplyFPSPatch(static_cast<uint8_t>(std::clamp(CSettings::m_Settings.iFPS, 20, 255)));
++            break;
+         default:
+             // Everything else is read by the game every frame.
+             break;
+@@ -340,6 +359,10 @@ bool CModernMenu::OnInitForPause(CMobileMenu* menu) {
      switch (g_state.load()) {
          case eState::PAUSE:
              if (NowMs() - g_lastPauseShownMs < BACK_DEBOUNCE_MS) return true;
@@ -3471,7 +3765,7 @@ index 6ed70ef..04c8eaa 100644
              // Back pressed again: close the modern pause menu.
              SetState(eState::NONE);
              CallJavaVoid("hidePause");
-@@ -415,6 +432,23 @@ void CModernMenu::ProcessRequests(CMobileMenu* menu) {
+@@ -415,6 +438,23 @@ void CModernMenu::ProcessRequests(CMobileMenu* menu) {
                  ApplySetting((arg >> 16) & 0xFFFF, static_cast<int16_t>(arg & 0xFFFF));
                  break;
  
@@ -3495,7 +3789,7 @@ index 6ed70ef..04c8eaa 100644
              case REQUEST_MAP_TO_PAUSE:
                  if (state != eState::MAP) break;
                  CloseNativeMenu(menu);
-@@ -481,6 +515,11 @@ void CModernMenu::ProcessRequests(CMobileMenu* menu) {
+@@ -481,6 +521,11 @@ void CModernMenu::ProcessRequests(CMobileMenu* menu) {
                  break;
          }
      }
@@ -3507,7 +3801,7 @@ index 6ed70ef..04c8eaa 100644
  }
  
  void CModernMenu::AfterUpdate(CMobileMenu* menu) {
-@@ -672,9 +711,13 @@ Java_com_holy_game_gui_modern_ModernMenu_nativeRequestArg(JNIEnv* env, jclass cl
+@@ -672,9 +717,13 @@ Java_com_holy_game_gui_modern_ModernMenu_nativeRequestArg(JNIEnv* env, jclass cl
  // GTA settings for the modern settings tabs: 4 ints per setting
  // (value, min, max, visible), MS_MAX settings. Plain int reads; the values
  // only change on the game thread and a stale value is corrected next time.
@@ -3522,7 +3816,7 @@ index 6ed70ef..04c8eaa 100644
      for (int i = 0; i < MS_MAX; ++i) {
          const MobileSettings& setting = CMobileSettings::ms_MobileSettings[i];
          data[i * 4 + 0] = setting.value;
-@@ -682,8 +725,15 @@ Java_com_holy_game_gui_modern_ModernMenu_nativeGetSettings(JNIEnv* env, jclass c
+@@ -682,8 +731,15 @@ Java_com_holy_game_gui_modern_ModernMenu_nativeGetSettings(JNIEnv* env, jclass c
          data[i * 4 + 2] = setting.max;
          data[i * 4 + 3] = setting.visible ? 1 : 0;
      }

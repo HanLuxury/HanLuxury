@@ -17,8 +17,62 @@
 #include "Models/ModelInfo.h"
 #include "Mobile/MobileSettings/MobileSettings.h"
 #include "modloader/HookScope.h"
+#include "graphics/RenderThread.h"
+#include <GLES3/gl3.h>
 #include <dlfcn.h>
 #include <cmath>
+
+// Shadow polygons (static, stored, real-time) lie on the ground or on
+// collision triangles and are drawn with a small fixed lift only, so they
+// z-fight with the road while the camera moves. Native Android RenderScene
+// has no depth bias for them. These RenderQueue callbacks run on GTA's render
+// thread around the shadow passes: polygon offset toward the camera, then
+// GTA's own factor/units are put back.
+//
+// GTA keeps a game-thread cache of GL_POLYGON_OFFSET_FILL for decal rasters
+// (HandleDecalZ, raster flag 0x200 -> rqSetZBias): a non-decal draw disables
+// it only when the cache says "on", then clears the cache. HandleDecalZ(0)
+// at both ends of the outer scope keeps that cache and the GL state equal:
+// before the pass GL is off and cache=0 (shadow draws then leave our offset
+// alone), after the pass GL is off again and cache=0.
+namespace {
+GLfloat g_offsetFactor = 0.f, g_offsetUnits = 0.f;
+int g_offsetDepth = 0; // render thread only
+int g_scopeDepth = 0;  // game thread only
+void ShadowDepthBiasOn(void*) {
+    if (g_offsetDepth++ != 0) return;
+    glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &g_offsetFactor);
+    glGetFloatv(GL_POLYGON_OFFSET_UNITS, &g_offsetUnits);
+    glEnable(GL_POLYGON_OFFSET_FILL);
+    glPolygonOffset(-4.f, -8.f);
+}
+void ShadowDepthBiasOff(void*) {
+    if (g_offsetDepth <= 0 || --g_offsetDepth != 0) return;
+    glPolygonOffset(g_offsetFactor, g_offsetUnits);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+}
+void SyncDecalZ() {
+    using HandleDecalZFn = void (*)(uint16_t);
+    static const auto handleDecalZ = reinterpret_cast<HandleDecalZFn>(dlsym(CHook::lib, "_Z12HandleDecalZt"));
+    if (handleDecalZ) handleDecalZ(0);
+}
+// Game thread. On and off are queued in pairs, in order with the shadow draws.
+struct ShadowDepthBiasScope {
+    bool queued = false;
+    ShadowDepthBiasScope() {
+        if (g_scopeDepth++ != 0 || !GraphicsRenderThread::Ready()) return;
+        SyncDecalZ();
+        queued = GraphicsRenderThread::Enqueue(&ShadowDepthBiasOn, nullptr);
+    }
+    ~ShadowDepthBiasScope() {
+        --g_scopeDepth;
+        if (!queued) return;
+        if (!GraphicsRenderThread::Enqueue(&ShadowDepthBiasOff, nullptr))
+            GraphicsRenderThread::Enqueue(&ShadowDepthBiasOff, nullptr);
+        SyncDecalZ();
+    }
+};
+} // namespace
 
 // Same split as native CShadows::RenderStaticShadows(bool) (0x6DFC60):
 // native RenderScene calls this twice per frame, (false) for darkening
@@ -36,6 +90,7 @@ static bool IsColouredStaticShadow(const CStaticShadow& shdw) {
 }
 
 void CShadows::RenderStaticShadows(bool renderColoured) {
+    ShadowDepthBiasScope depthBias;
     RwRenderStateSet(rwRENDERSTATEZWRITEENABLE,         RWRSTATE(FALSE));
     RwRenderStateSet(rwRENDERSTATEZTESTENABLE,          RWRSTATE(TRUE));
     RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE,    RWRSTATE(TRUE));
@@ -823,6 +878,15 @@ void CShadows::StoreRealTimeShadow(CPhysical* physical, float displacementX, flo
 // the camera moves a caster across the 15 m / 32 m ring. Same function and
 // return value (bool, tested by Update at 0x6DCE4C), nothing stored beyond it.
 static bool (*StoreRealTimeShadow_orig)(CPhysical*, float, float, float, float, float, float) = nullptr;
+
+// Native CShadows::RenderStoredShadows(bool) (blobs, real-time shadows, light
+// pools), wrapped only for the depth bias above.
+static void (*RenderStoredShadows_orig)(bool) = nullptr;
+static void RenderStoredShadows_hook(bool renderColoured) {
+    ML_HOOK_SCOPE();
+    ShadowDepthBiasScope depthBias;
+    if (RenderStoredShadows_orig) RenderStoredShadows_orig(renderColoured);
+}
 // libGTASA MAX_DISTANCE_PED_SHADOWS (exported), set to 15 or 32 m every frame
 // by native UpdateStaticShadows depending on MobileSettings[MS_Shadows].
 static const float* s_maxPedShadowDistance = nullptr;
@@ -870,6 +934,8 @@ void CShadows::InjectHooks() {
 
     CHook::Redirect("_ZN8CShadows19StoreCarLightShadowEP8CVehicleiP9RwTextureP7CVectorffffhhhf", &StoreCarLightShadow);
     CHook::Redirect("_ZN8CShadows19RenderStaticShadowsEb", &RenderStaticShadows);
+
+    CHook::InlineHook("_ZN8CShadows19RenderStoredShadowsEb", &RenderStoredShadows_hook, &RenderStoredShadows_orig);
 
     // Optional: without the exported distance the native function stays as is.
     s_maxPedShadowDistance = static_cast<const float*>(dlsym(CHook::lib, "MAX_DISTANCE_PED_SHADOWS"));

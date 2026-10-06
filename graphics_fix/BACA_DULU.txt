@@ -1,5 +1,5 @@
-PERBAIKAN GRAFIS (TAHAP 1) - GTA SA Android 2.10 arm64, SA-MP, TANPA AML
-=========================================================================
+PERBAIKAN GRAFIS (TAHAP 1 + 2) - GTA SA Android 2.10 arm64, SA-MP, TANPA AML
+=============================================================================
 Ini perbaikan pada sistem grafis YANG SUDAH ADA di source Anda
 (graphics/postfx, graphics/sun, game/Shadow, menu GRAFIS). Tidak ada engine
 kedua, tidak ada menu baru, tidak ada resource Android baru.
@@ -9,6 +9,9 @@ CARA PASANG
 1. C++: salin isi jni/ ke folder jni project (timpa). File baru:
    graphics/RenderThread.*, graphics/GraphicsSettings.* (ikut ter-build
    otomatis oleh CMake GLOB_RECURSE / find di Android.mk).
+   Tahap 2 menambah file yang ditimpa: game/patches.cpp, game/hooks.cpp,
+   game/CRenderTarget.cpp, gui/imgui_impl_renderware.cpp.
+   Patch berisi tahap 1 + 2 sekaligus (diterapkan ke source ASLI).
    Atau: cd jni && git apply ../graphics_fix/patches/jni.patch
 2. Kotlin: salin java/ ke folder java project (timpa 4 file).
    Atau: git apply patches/java.patch
@@ -38,6 +41,22 @@ PENYEBAB FLICKER YANG DITEMUKAN (sudah diperbaiki)
    arah matahari distabilkan (dead-zone 0.3 derajat), PCF hardware,
    bias normal/slope, depth asli disalin (bukan digambar ulang).
 
+PENYEBAB FLICKER / STUTTER LAIN (TAHAP 2, sudah diperbaiki)
+------------------------------------------------------------
+10. Bayangan di jalan z-fighting (garis/bintik berkedip saat kamera jalan).
+    -> polygon offset hanya selama pass bayangan (render thread), cache
+    z-bias decal GTA (HandleDecalZ) tetap sinkron, state GL dikembalikan.
+11. Bayangan NPC jauh memakai raster 16x16 px (kotak buram berkedip).
+    -> CRealTimeShadow::Create kelas 16 px dinaikkan ke 256 px.
+12. Pantulan mobil berkedip: CRenderTarget (plat/snapshot) meninggalkan
+    kamera visibility di (0,0,50). -> kamera scene dipulihkan.
+13. Stutter saat memutar kamera di map berat: CObject render menelusuri
+    SELURUH pool objek SA-MP untuk tiap objek. -> hanya objek material.
+14. Window ImGui (chat panjang + dialog) hilang-muncul: buffer vertex
+    dibatasi 30000. -> buffer tumbuh sesuai kebutuhan.
+15. FPS limiter tidak berfungsi (selalu 60). -> nilai settings.ini /
+    /fpslimit / baris "Pembatas frame" diterapkan (20..refresh layar).
+
 FITUR (memakai sistem yang ada)
 -------------------------------
 - Sinar matahari / god rays: sudah ada (light_shafts). Sekarang terhalang
@@ -50,6 +69,8 @@ FITUR (memakai sistem yang ada)
   transisi halus.
 - Rumput: CPlantMgr::Update dipanggil lagi (sebelumnya tidak pernah).
 - Awan bergerak lagi (CClouds::Update).
+- FXAA (tahap 2): anti-aliasing di composite PostFX, sebelum HUD.
+  HUD/chat/CEF/dialog tidak ikut di-blur.
 
 MENU GRAFIS (tab GRAFIS yang sama)
 ---------------------------------
@@ -57,19 +78,23 @@ Baru di bawah "GRAFIS KLIEN": Preset (Rendah/Sedang/Tinggi/Ultra/Kustom),
 Post FX, Bayangan matahari, Resolusi bayangan, Jarak bayangan, Bayangan
 lembut, Ambient occlusion, Refleksi layar, Sinar matahari, Bloom, Langit
 realtime, Jalan basah, Grafis ikut cuaca, Kabut, Rumput, Simpan, Reset.
+Tahap 2: baris "Anti-aliasing (FXAA)", "Pembatas frame" benar-benar
+dipakai, panel samping bisa di-scroll, aman untuk notch/cutout.
 Juga: Kepadatan populasi (MS_Traffic). Subtitle pindah ke tab AUDIO.
 Disimpan di /storage/emulated/0/TESTLIT/SAMP/settings.ini bagian [graphics]
 (otomatis 0.8 detik setelah diubah, dan saat tombol Simpan / keluar game).
 
 TIDAK ADA DI SOURCE (jujur)
 ---------------------------
-FXAA/MSAA, VSync, Motion Blur (dimatikan RET oleh client), DOF, Anisotropic,
-Texture Quality. Belum dibuat di tahap ini.
+MSAA, VSync, Motion Blur (dimatikan RET oleh client), DOF, Anisotropic,
+Texture Quality. Belum dibuat. (FXAA sudah dibuat di tahap 2.)
 
 STATUS PENGECEKAN
 -----------------
-- 13 file C++ lolos syntax-check aarch64 (clang, -Wall). Error main.cpp
-  mcontext_t hanya dari header host x86, sama dengan file asli.
+- 18 file C++ yang diubah lolos syntax-check aarch64 (clang, -Wall).
+  Error main.cpp mcontext_t dan voice/Memory.hpp std::memcpy hanya dari
+  header host, sama persis dengan file asli.
+- patches/jni.patch dan java.patch lolos "git apply --check" ke source asli.
 - 14 shader GLSL lolos glslang + 10 pasangan link.
 - Kotlin menu lolos kotlinc 1.9 (error HudLayoutEditor.kt:67 sudah ada di
   file asli, tidak diubah).
@@ -81,9 +106,10 @@ STATUS PENGECEKAN
     "SUN4 world depth copied"
     "SUN4 world shadows rendered"
     "Scene boundary: depth=world copy"
+    "New fps limit = ..."
 
 BELUM DIKERJAKAN (tahap berikut)
 --------------------------------
-- Polygon offset bayangan GTA (SHD-09), raster 16px bayangan NPC (SHD-04),
-  culling bayangan RT di tepi layar (SHD-05).
-- Mipmap PowerVR, FPS limiter (selalu 60), layout menu cutout/notch.
+- Culling bayangan RT di tepi layar (SHD-05).
+- Mipmap PowerVR (tekstur shimmer di GPU PowerVR).
+- MSAA/VSync/DOF/Anisotropic: tidak ada di source, perlu dibuat baru.

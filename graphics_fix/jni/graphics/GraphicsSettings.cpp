@@ -31,6 +31,7 @@ constexpr std::array<Spec,COUNT> kSpecs{{
     {"weather_look",      0,   1, {1,   1,   1,   1}},
     {"fog",               0, 100, {50, 60,  65,  70}},
     {"grass",             0,   1, {0,   1,   1,   1}},
+    {"fxaa",              0,   1, {0,   1,   1,   1}},
 }};
 constexpr int32_t kDefaultPreset=1;
 std::array<int32_t,COUNT> values{};
@@ -101,6 +102,7 @@ void Apply() {
     fx.wetStrength=Percent(WET_ROADS);
     fx.weatherLook=values[WEATHER_LOOK]!=0;
     fx.fogStrength=Percent(FOG);
+    fx.fxaa=values[FXAA]!=0;
     EglPostFX::SetSettings(fx);
 
     WorldSunShadow::Settings sun;

@@ -36,6 +36,7 @@ uniform vec4 uSkyHorizon;   // rgb, w = horizon haze
 uniform vec4 uSunColor;     // rgb, w = sun glow strength
 uniform vec4 uWet;          // wetness, rain, puddle coverage, reflection boost
 uniform vec2 uDepthTexel;   // 1 / depth texture size
+uniform int uFXAA;          // 1 = FXAA on the world image (HUD is drawn later)
 #include "reference_color.glsl"
 float viewDepth(vec2 uv) {
     float z=(texture(uDepth,uv).r-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
@@ -96,6 +97,24 @@ vec4 effects() {
 vec3 scene(vec2 uv) {
     vec3 c=texture(uScene,uv).rgb;return uDecodeSRGB!=0 ? linearRGB(c) : c;
 }
+// FXAA (Lottes, console-style): 5 taps, smooths stair-step edges and thin
+// shimmering geometry without blurring flat areas.
+vec3 fxaaScene(vec2 uv) {
+    vec3 m=scene(uv);
+    vec3 nw=scene(uv+vec2(-1.0,-1.0)*uTexel), ne=scene(uv+vec2(1.0,-1.0)*uTexel);
+    vec3 sw=scene(uv+vec2(-1.0,1.0)*uTexel), se=scene(uv+vec2(1.0,1.0)*uTexel);
+    float lm=luma(m),lnw=luma(nw),lne=luma(ne),lsw=luma(sw),lse=luma(se);
+    float lmin=min(lm,min(min(lnw,lne),min(lsw,lse)));
+    float lmax=max(lm,max(max(lnw,lne),max(lsw,lse)));
+    if(lmax-lmin<max(0.0312,lmax*0.125)) return m;
+    vec2 dir=vec2(-((lnw+lne)-(lsw+lse)),(lnw+lsw)-(lne+lse));
+    float reduce=max((lnw+lne+lsw+lse)*0.03125,1.0/128.0);
+    dir=clamp(dir/(min(abs(dir.x),abs(dir.y))+reduce),vec2(-8.0),vec2(8.0))*uTexel;
+    vec3 a=0.5*(scene(uv+dir*(1.0/3.0-0.5))+scene(uv+dir*(2.0/3.0-0.5)));
+    vec3 b=a*0.5+0.25*(scene(uv-dir*0.5)+scene(uv+dir*0.5));
+    float lb=luma(b);
+    return (lb<lmin||lb>lmax) ? a : b;
+}
 // Wet asphalt and puddles on flat ground. Returns the reflection multiplier.
 float wetSurface(inout vec3 c) {
     vec3 p=viewPosition(vUV);
@@ -131,7 +150,7 @@ vec3 skyGrade(vec3 c) {
 }
 void main() {
     vec4 src=texture(uScene,vUV);
-    vec3 c=uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb;
+    vec3 c=uFXAA!=0 ? fxaaScene(vUV) : (uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb);
     vec3 local=(scene(vUV+vec2(uTexel.x,0))+scene(vUV-vec2(uTexel.x,0))
         +scene(vUV+vec2(0,uTexel.y))+scene(vUV-vec2(0,uTexel.y)))*0.25;
     c=max(c+clamp((luma(c)-luma(local))*uDetail.x,-0.035,0.035),vec3(0));
