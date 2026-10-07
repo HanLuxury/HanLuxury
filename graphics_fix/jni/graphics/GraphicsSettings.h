@@ -4,7 +4,7 @@
 struct ini_table_s;
 
 // Options of the client's existing graphics system (EglPostFX, WorldSunShadow,
-// CPlantMgr update, texture filtering, world MSAA), shown as extra rows in the
+// CPlantMgr update, texture filtering, world MSAA, TAA), shown as extra rows in the
 // GRAFIS tab of the existing ModernPauseMenu and stored in the existing
 // settings.ini ([graphics]) through CSettings. Nothing here renders; Apply()
 // only hands values to the systems.
@@ -38,6 +38,7 @@ enum Id : int32_t {
     DOF,               // depth of field (distance blur), percent
     ANISOTROPIC,       // texture filtering: 0 off, 1 = 2x, 2 = 4x, 3 = 8x, 4 = 16x
     ADAPTIVE,          // lower heavy effects automatically while the FPS is low
+    TAA,               // temporal anti-aliasing (history of earlier frames)
     COUNT
 };
 // Menu setting ids: GTA's MobileSettings use 0..MS_MAX-1 (37); these start here.

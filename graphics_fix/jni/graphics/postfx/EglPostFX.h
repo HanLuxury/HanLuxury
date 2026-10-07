@@ -60,6 +60,8 @@ struct Settings {
     float wetStrength = 1.0f;  // Jalan basah/genangan saat hujan (CWeather::WetRoads).
     float motionBlur = 0.0f;   // Motion blur kamera (reproyeksi depth), 0..1. 0 = pass dilewati.
     float dofStrength = 0.0f;  // Depth of field (latar jauh buram), 0..1. 0 = pass dilewati.
+    bool taa = false;          // Temporal AA: gabung frame lalu (reproyeksi depth + kamera).
+    float taaHistory = 0.85f;  // Bobot riwayat TAA (ZyZGfx.ini [TAA] History). 0 = mati.
     // Tampilan sinematik. Nilai bawaan = foto referensi; bisa ditimpa oleh
     // TESTLIT/graphics/ZyZGfx.ini (GraphicsSettings::LoadTuning).
     float autoExposure = 0.25f; // Adaptasi mata 0..1 (0 = mati).

@@ -1,6 +1,7 @@
 #include "GraphicsSettings.h"
 #include "postfx/EglPostFX.h"
 #include "sun/WorldSunShadow.h"
+#include "ShaderTweaks.h"
 #include "TextureFilter.h"
 #include "WorldMsaa.h"
 #include "../main.h"
@@ -51,6 +52,7 @@ constexpr std::array<Spec,COUNT> kSpecs{{
     {"dof",               0, 100, {0,   0,  20,  35}},
     {"anisotropic",       0,   4, {1,   2,   3,   4}},
     {"auto_quality",      0,   1, {1,   1,   1,   1}},
+    {"taa",               0,   1, {0,   0,   0,   1}},
 }};
 // "Rendah" = the cheap but still pretty look for weak phones: no sun-shadow
 // replay, no SSAO/SSR, but grading, bloom, haze, sky, wet roads and FXAA.
@@ -98,6 +100,7 @@ void LoadTuning() {
     // Built-in look matching the reference photos: soft filmic tone, mild
     // contrast, sunlit haze, gentle eye adaptation.
     fx.toneMix=0.5f;fx.exposure=1.0f;fx.saturation=1.02f;fx.contrast=0.95f;
+    ShaderTweaks::SetVehicle(ShaderTweaks::Vehicle{});
     if(!g_pszStorage) return;
     std::snprintf(fx.textureDir,sizeof(fx.textureDir),"%sgraphics/textures/",g_pszStorage);
     char path[256];
@@ -174,10 +177,22 @@ void LoadTuning() {
     } else {
         fx.wetReflection=fx.wetPuddles=fx.wetRipples=0.0f;
     }
+    // Car paint in GTA's own shaders (ZyZ units -> ShaderTweaks defaults at
+    // the shipped values: Fresnel 0.2, Specular 0.6, SkyReflection 5.55,
+    // SunGlint 5, Gloss 280). Shaders built after this use it.
+    ShaderTweaks::Vehicle vehicle;
+    vehicle.enabled=On("Vehicle");
+    vehicle.fresnel=F("Vehicle","Fresnel",0.2f)*2.5f;
+    vehicle.specular=F("Vehicle","Specular",0.6f)*(0.4f/0.6f);
+    vehicle.reflection=F("Vehicle","SkyReflection",5.55f)/5.55f;
+    vehicle.glint=F("Vehicle","SunGlint",5.0f)*0.06f;
+    vehicle.gloss=F("Vehicle","Gloss",280.0f)*0.35f;
+    ShaderTweaks::SetVehicle(vehicle);
+    fx.taaHistory=On("TAA") ? F("TAA","History",fx.taaHistory) : 0.0f;
     tuning.loaded=true;
     ini_table_destroy(t);
-    GS_LOG("loaded %s (sections HDR/TAA/Vehicle/Water/Lighting/Wind/Relief/Surfaces/Rain/"
-           "ExperimentalLights are not used by this client)",path);
+    GS_LOG("loaded %s (sections HDR/Water/Lighting/Wind/Relief/Surfaces/Rain/ExperimentalLights "
+           "and Vehicle Metallic/Flakes are not used by this client)",path);
 }
 
 void LoadPreset(int32_t preset) {
@@ -208,6 +223,7 @@ int32_t Max(int32_t id) { return Valid(id) ? kSpecs[id].max : 0; }
 bool Visible(int32_t id) {
     if(id==MSAA) return msaaSupport.load()!=0;
     if(id==ANISOTROPIC) return anisoSupport.load()!=0;
+    if(id==TAA) return !LowMemory(); // two extra full-screen buffers
     return Valid(id);
 }
 void SetMsaaSupport(bool supported) { msaaSupport.store(supported ? 1 : 0); }
@@ -297,6 +313,7 @@ void Apply() {
     fx.motionBlur=Percent(MOTION_BLUR);
     fx.dofStrength=Percent(DOF);
     fx.lowMemory=LowMemory();
+    fx.taa=values[TAA]!=0 && !fx.lowMemory;
     EglPostFX::SetSettings(fx);
 
     WorldSunShadow::Settings sun;

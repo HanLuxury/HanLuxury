@@ -15,6 +15,7 @@ TABLE = [
     ("kComposite", "composite.frag"),
     ("kAtmosphere", "atmosphere.frag"),
     ("kState", "state.frag"),
+    ("kTaa", "taa.frag"),
     ("kCompatVertex", "compat_fullscreen.vert"),
     ("kCompatBloom", "compat_bloom.frag"),
     ("kCompatComposite", "compat_composite.frag"),

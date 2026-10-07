@@ -13,7 +13,7 @@ index 497fe1b..8ff038d 100644
      }
  
 diff --git a/java/com/holy/game/gui/modern/GtaSettings.kt b/java/com/holy/game/gui/modern/GtaSettings.kt
-index c3b9503..ea13518 100644
+index c3b9503..a27fd57 100644
 --- a/java/com/holy/game/gui/modern/GtaSettings.kt
 +++ b/java/com/holy/game/gui/modern/GtaSettings.kt
 @@ -9,6 +9,7 @@ object GtaSettings {
@@ -24,7 +24,7 @@ index c3b9503..ea13518 100644
      const val SHADOWS = 5
      const val TARGETING = 6
      const val CAR_REFLECTIONS = 7
-@@ -28,4 +29,29 @@ object GtaSettings {
+@@ -28,4 +29,30 @@ object GtaSettings {
  
      /** eMobileSettings::MS_MAX; nativeGetSettings() returns 4 ints per setting. */
      const val COUNT = 37
@@ -53,6 +53,7 @@ index c3b9503..ea13518 100644
 +    const val GFX_DOF = GFX_BASE + 18
 +    const val GFX_ANISOTROPIC = GFX_BASE + 19
 +    const val GFX_ADAPTIVE = GFX_BASE + 20
++    const val GFX_TAA = GFX_BASE + 21
  }
 diff --git a/java/com/holy/game/gui/modern/GtaSliderView.kt b/java/com/holy/game/gui/modern/GtaSliderView.kt
 index 5a7f6f2..c8ce484 100644
@@ -169,7 +170,7 @@ index a5bec4b..03cea6e 100644
  
      // ------------------------------------------------------------------ HUD
 diff --git a/java/com/holy/game/gui/modern/ModernPauseMenu.kt b/java/com/holy/game/gui/modern/ModernPauseMenu.kt
-index d26f6ac..0ba04a3 100644
+index d26f6ac..a4d3a7c 100644
 --- a/java/com/holy/game/gui/modern/ModernPauseMenu.kt
 +++ b/java/com/holy/game/gui/modern/ModernPauseMenu.kt
 @@ -41,14 +41,19 @@ class ModernPauseMenu(private val activity: Activity) {
@@ -274,7 +275,7 @@ index d26f6ac..0ba04a3 100644
              buildRows()
              rowsScroll.scrollTo(0, 0)
          }
-@@ -449,29 +483,82 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -449,29 +483,85 @@ class ModernPauseMenu(private val activity: Activity) {
          TabId.GAME -> gameRows()
          TabId.GRAPHICS -> settingRows(
              option(GtaSettings.VISUALS, "Kualitas visual",
@@ -306,13 +307,16 @@ index d26f6ac..0ba04a3 100644
 +                "Mengatur semua pilihan di bawah sekaligus. Berubah ke Kustom bila satu nilai diganti.",
 +                listOf("Rendah", "Sedang", "Tinggi", "Ultra", "Kustom")),
 +            option(GtaSettings.GFX_ADAPTIVE, "Kualitas otomatis",
-+                "Saat FPS turun, efek berat (SSAO, refleksi, DOF, motion blur, bayangan matahari) dikurangi sendiri lalu kembali saat FPS normal.",
++                "Saat FPS turun, efek berat (SSAO, refleksi, DOF, motion blur, TAA, bayangan matahari) dikurangi sendiri lalu kembali saat FPS normal.",
 +                ON_OFF),
 +            option(GtaSettings.GFX_FXAA, "Anti-aliasing (FXAA)",
 +                "Menghaluskan tepi bergerigi dan kedip tepi tipis pada dunia. HUD tidak ikut diblur.", ON_OFF),
 +            option(GtaSettings.GFX_MSAA, "MSAA",
 +                "Anti-aliasing multisample untuk dunia 3D. Lebih halus dari FXAA, lebih berat.",
 +                listOf("Mati", "2x", "4x")),
++            option(GtaSettings.GFX_TAA, "TAA",
++                "Anti-aliasing temporal: frame sebelumnya ikut digabung, tepi daun, pagar dan kabel tidak berkedip saat kamera bergerak. Tambah memori GPU.",
++                ON_OFF),
 +            option(GtaSettings.GFX_ANISOTROPIC, "Filter anisotropic",
 +                "Tekstur jalan dan dinding tetap tajam saat dilihat miring/jauh.",
 +                listOf("Mati", "2x", "4x", "8x", "16x")),
@@ -363,7 +367,7 @@ index d26f6ac..0ba04a3 100644
          )
          TabId.CONTROLS -> listOf<Row>(editGtaControlsRow()) + settingRows(
              option(GtaSettings.TARGETING, "Mode bidik",
-@@ -515,8 +602,51 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -515,8 +605,51 @@ class ModernPauseMenu(private val activity: Activity) {
      private fun option(setting: Int, label: String, desc: String, options: List<String>): Row? =
          if (isAvailable(setting)) OptionRow(label, desc, setting, options) else null
  
@@ -417,7 +421,7 @@ index d26f6ac..0ba04a3 100644
  
      private fun settingRows(vararg rows: Row?): List<Row> {
          val list = rows.filterNotNull()
-@@ -538,20 +668,36 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -538,20 +671,36 @@ class ModernPauseMenu(private val activity: Activity) {
      private fun settingMin(setting: Int) = settings?.getOrNull(setting * 4 + 1) ?: 0
      private fun settingMax(setting: Int) = settings?.getOrNull(setting * 4 + 2) ?: 0
  
@@ -457,7 +461,7 @@ index d26f6ac..0ba04a3 100644
              lp.bottomMargin = dp(2f).toInt()
              rowsLayout.addView(views.view, lp)
              rows.add(views)
-@@ -612,15 +758,20 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -612,15 +761,20 @@ class ModernPauseMenu(private val activity: Activity) {
          if (row is OptionRow) {
              left?.setOnClickListener { onRowTapped(views, -1, fromControl = true) }
              right?.setOnClickListener { onRowTapped(views, 1, fromControl = true) }
@@ -481,7 +485,7 @@ index d26f6ac..0ba04a3 100644
          }
          return views
      }
-@@ -641,6 +792,7 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -641,6 +795,7 @@ class ModernPauseMenu(private val activity: Activity) {
  
      private fun handleRowTap(views: RowViews, direction: Int, fromControl: Boolean) {
          if (hiding) return
@@ -489,7 +493,7 @@ index d26f6ac..0ba04a3 100644
          val alreadySelected = rows.indexOf(views) == selectedRow
          select(views)
          when (val row = views.row) {
-@@ -650,8 +802,16 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -650,8 +805,16 @@ class ModernPauseMenu(private val activity: Activity) {
                  val min = settingMin(row.setting)
                  val max = settingMax(row.setting)
                  var next = settingValue(row.setting) + direction
@@ -508,7 +512,7 @@ index d26f6ac..0ba04a3 100644
                  setSettingValue(row.setting, next)
                  bindRow(views, true)
              }
-@@ -690,12 +850,18 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -690,12 +853,18 @@ class ModernPauseMenu(private val activity: Activity) {
                      val range = (settingMax(row.setting) - settingMin(row.setting)).coerceAtLeast(1)
                      "${(v - settingMin(row.setting)) * 100 / range}%"
                  } else {
@@ -529,7 +533,7 @@ index d26f6ac..0ba04a3 100644
              }
          }
      }
-@@ -803,6 +969,7 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -803,6 +972,7 @@ class ModernPauseMenu(private val activity: Activity) {
          const val REPEAT_DELAY_MS = 350L
          const val REPEAT_INTERVAL_MS = 110L
          const val ROW_HEIGHT_DP = 36f

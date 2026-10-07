@@ -1,4 +1,4 @@
-PERBAIKAN GRAFIS (TAHAP 1 - 5) + VICE CITY - GTA SA Android 2.10 arm64, TANPA AML
+PERBAIKAN GRAFIS (TAHAP 1 - 6) + VICE CITY - GTA SA Android 2.10 arm64, TANPA AML
 ==================================================================================
 Ini perbaikan pada sistem grafis YANG SUDAH ADA di source Anda
 (graphics/postfx, graphics/sun, game/Shadow, menu GRAFIS). Tidak ada engine
@@ -25,6 +25,8 @@ CARA PASANG
    /storage/emulated/0/TESTLIT/graphics/ (file graphics Anda yang lain
    tetap, tidak ditimpa). File baru C++: graphics/TextureFilter.*,
    graphics/WorldMsaa.*, graphics/postfx/shaders/state.frag.
+   Tahap 6: file baru graphics/ShaderTweaks.*, graphics/postfx/shaders/
+   taa.frag; ZyZGfx.ini ikut diperbarui (salin lagi).
    Atau: git apply patches/java.patch
 3. Build seperti biasa. AML tidak dibutuhkan lagi untuk grafis.
 
@@ -167,6 +169,29 @@ TAHAP 5
     semua) tidak digambar lagi kalau bayangannya tidak mungkin terlihat
     di layar (SHD-05). Bayangan pemain selalu ada. Hemat GPU saat ramai.
 
+TAHAP 6
+-------
+41. Cat mobil lebih mengkilap ([Vehicle] di ZyZGfx.ini). Bukan shader
+    baru: baris tambahan disisipkan ke shader GTA SENDIRI saat GTA
+    membuatnya (hook RQShader::BuildSource). Isi: Fresnel (pantulan langit
+    lebih kuat di sisi miring bodi), specular tambahan, kilau matahari
+    tajam (SunGlint, Gloss). Juga kena kaca/objek lain yang memakai
+    env-map GTA. Baris asli GTA tidak dihapus; kalau teks shader GTA tidak
+    cocok (versi lain / mod lain mengubahnya) shader dibiarkan asli.
+    Air, ped, dan shader tanpa normal tidak disentuh. Hasil dicek: 5
+    varian shader mobil lolos compile + link glslang, panjang < 8193 byte
+    (batas buffer GTA). Nilai INI berlaku setelah game DIRESTART (GTA
+    membuat shader sekali). Mematikan: [Vehicle] Enable = 0.
+42. TAA (menu "TAA", preset Ultra). Frame sebelumnya digabung lewat
+    reproyeksi depth + kamera, dibatasi warna 3x3 tetangga supaya mobil/
+    orang yang bergerak tidak meninggalkan jejak. Mobil/karakter sendiri
+    (< 6 m) tidak diproyeksi ulang. Reset otomatis saat teleport/ganti
+    kamera. Kekuatan: [TAA] History (0.85). Jujur: GTA tidak menggeser
+    (jitter) proyeksinya, jadi ini TAA penstabil: tepi daun, pagar, kabel
+    tidak berkedip saat kamera bergerak; saat diam hasilnya = FXAA/MSAA.
+    Pakai 2 buffer layar penuh: tidak muncul di HP RAM < 3.5 GB, dimatikan
+    "Kualitas otomatis" saat FPS turun, buffer dilepas saat TAA dimatikan.
+
 VICE CITY (file kiriman Anda)
 -----------------------------
 Dipasang utuh: patch-nya menempel bersih di atas perbaikan grafis, tidak
@@ -202,11 +227,18 @@ Disimpan di /storage/emulated/0/TESTLIT/SAMP/settings.ini bagian [graphics]
 
 TIDAK ADA DI SOURCE (jujur)
 ---------------------------
-VSync (diatur Android/EGL), TAA, Texture Quality. MSAA, Motion Blur, DOF
-dan Anisotropic dibuat di tahap 4 (lihat di atas). FXAA di tahap 2.
+VSync (diatur Android/EGL), Texture Quality. MSAA, Motion Blur, DOF
+dan Anisotropic dibuat di tahap 4, TAA di tahap 6 (lihat di atas). FXAA
+di tahap 2.
 
 STATUS PENGECEKAN
 -----------------
+- Tahap 6: ShaderTweaks.cpp, EglPostFX.cpp, GraphicsSettings.cpp,
+  ModernMenu.cpp lolos syntax-check aarch64; 12 shader PostFX lolos
+  glslang (taa.frag + link); 6 varian shader GTA (mobil env-map, sphere
+  env-map, alpha test, tanpa light, skinned, tanpa normal) dites di host
+  (ASan/UBSan) lalu lolos compile + link glslang; teks yang disisipi
+  dicek ada persis di libGTASA 2.10 .rodata. Kotlin menu lolos.
 - Tahap 5: EglPostFX.cpp, GraphicsSettings.cpp, RealTimeShadowManager.cpp
   lolos syntax-check aarch64; 15 shader + 5 link lolos glslang.
 - Tahap 4: 36 file C++ yang diubah lolos syntax-check aarch64; 15 shader
@@ -229,6 +261,9 @@ STATUS PENGECEKAN
     "SUN4 world shadows rendered"
     "Scene boundary: depth=world copy"
     "New fps limit = ..."
+    "shader tweaks installed" / "car paint shader patched (flags ...)"
+      (tag GfxShaderTweaks)
+    "TAA shader unavailable" / "TAA buffers ... unavailable" (EglPostFX)
     "SUN4 shadow targets unavailable" / "PostFX targets ... unavailable"
       (kalau muncul: memori GPU penuh, grafis mencoba lagi sendiri)
 
@@ -240,4 +275,5 @@ Kirim isi /sdcard/TESTLIT/crash_native.txt LENGKAP (baris fault, pc, lr dan
 BELUM DIKERJAKAN (tahap berikut)
 --------------------------------
 - Mipmap PowerVR (tekstur shimmer di GPU PowerVR).
-- VSync (diatur Android/EGL), TAA, shader kendaraan/air dari ZyZGfx.ini.
+- Shader air dari ZyZGfx.ini [Water], efek hujan di lensa.
+- VSync (diatur Android/EGL).

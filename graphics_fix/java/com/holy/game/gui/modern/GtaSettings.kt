@@ -54,4 +54,5 @@ object GtaSettings {
     const val GFX_DOF = GFX_BASE + 18
     const val GFX_ANISOTROPIC = GFX_BASE + 19
     const val GFX_ADAPTIVE = GFX_BASE + 20
+    const val GFX_TAA = GFX_BASE + 21
 }

@@ -5,6 +5,7 @@
 #include "../sun/WorldSunShadow.h"
 #include "../RenderThread.h"
 #include "../GraphicsSettings.h"
+#include "../ShaderTweaks.h"
 #include "../TextureFilter.h"
 #include "../WorldMsaa.h"
 #include "../../modloader/HookScope.h"
@@ -188,7 +189,7 @@ enum Uniform { Source,Texel,Decode,Extract,ThresholdKnee,Direction,Scene,Depth,
     EffectSize,LightCount,LightPosition,LightColor,Time,Aspect,Detail,ShadowTint,
     HighlightTint,Fog,Sun,Atmosphere,InvView,SunDirection,SkyZenith,SkyHorizon,SunColor,
     Wet,DepthTexel,FXAA,State,DofTex,LUT,Haze,HazeBase,AutoExposure,Dof,Motion,
-    PrevViewProj,Lut,Finish,Rays,Adapt,Focus,PuddleMask,Ripple,Relief,WetTex,UniformCount };
+    PrevViewProj,Lut,Finish,Rays,Adapt,Focus,PuddleMask,Ripple,Relief,WetTex,Taa,UniformCount };
 constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract",
     "uThresholdKnee","uDirection","uScene","uDepth","uProjection","uInvProjection",
     "uDepthRange","uClearDepth","uForwardSign","uSSR","uAO","uSSRParams","uAOParams",
@@ -198,7 +199,7 @@ constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract
     "uFog","uSun","uAtmosphere","uInvView","uSunDirection","uSkyZenith","uSkyHorizon",
     "uSunColor","uWet","uDepthTexel","uFXAA","uState","uDofTex","uLUT","uHaze",
     "uHazeBase","uAutoExposure","uDof","uMotion","uPrevViewProj","uLut","uFinish","uRays",
-    "uAdapt","uFocus","uPuddleMask","uRipple","uRelief","uWetTex"};
+    "uAdapt","uFocus","uPuddleMask","uRipple","uRelief","uWetTex","uTaa"};
 static_assert(sizeof(uniformNames)/sizeof(uniformNames[0])==UniformCount);
 struct Program {
     GLuint id=0;GLint location[UniformCount]{};
@@ -287,7 +288,11 @@ struct ContextState {
     int width=0,height=0;GLenum colorFormat=0,depthFormat=0;
     Target scene,bloom[3],ping[3],effects,atmosphere;
     Target state[2],dof;          // 1x1 frame state (exposure, focus), half-res DOF source
-    Program downsample,blur,depthEffects,composite,atmosphereProgram,stateProgram;
+    Target taa[2];                // TAA history ping-pong, only while TAA is on
+    Program downsample,blur,depthEffects,composite,atmosphereProgram,stateProgram,taaProgram;
+    // Colour every pass reads this frame: the scene copy, or the TAA result.
+    GLuint sceneInput=0;
+    int taaIndex=0;GLenum taaFormat=0;bool taaValid=false;unsigned taaRetry=0;
     int stateIndex=0;bool stateValid=false,lowMemoryTargets=false;
     std::chrono::steady_clock::time_point stateTime{};
     GLuint lut=0;int lutSize=0;char lutLoaded[192]{};bool lutTried=false;
@@ -300,13 +305,16 @@ struct ContextState {
         // Scene FBO owns an attachment reference: delete it before the depth texture.
         scene.Destroy();for(auto& x:bloom) x.Destroy();for(auto& x:ping) x.Destroy();effects.Destroy();
         atmosphere.Destroy();state[0].Destroy();state[1].Destroy();dof.Destroy();
+        DestroyTaa();
         stateValid=false;havePrev=false;
         if(depthTexture) glDeleteTextures(1,&depthTexture);
         depthTexture=0;depthFormat=0;width=height=0;
     }
+    void DestroyTaa() { taa[0].Destroy();taa[1].Destroy();taaFormat=0;taaValid=false; }
     void Destroy() {
         DestroyTargets();downsample.Destroy();blur.Destroy();depthEffects.Destroy();composite.Destroy();
-        atmosphereProgram.Destroy();stateProgram.Destroy();compat.Destroy();
+        atmosphereProgram.Destroy();stateProgram.Destroy();taaProgram.Destroy();compat.Destroy();
+        taaRetry=0;
         if(lut) glDeleteTextures(1,&lut);
         lut=0;lutSize=0;lutLoaded[0]=0;lutTried=false;
         GLuint wet[3]={wetPuddle,wetRipple,wetRelief};
@@ -321,6 +329,8 @@ struct ContextState {
         const bool ok=Link(downsample,vs,Shaders::kDownsample) && Link(blur,vs,Shaders::kBlur)
             && Link(depthEffects,vs,Shaders::kDepthEffects) && Link(composite,vs,Shaders::kComposite)
             && Link(atmosphereProgram,vs,Shaders::kAtmosphere) && Link(stateProgram,vs,Shaders::kState);
+        // Optional: a driver that rejects TAA keeps every other effect.
+        if(ok && !Link(taaProgram,vs,Shaders::kTaa)) FX_LOG("TAA shader unavailable on this GPU, TAA off");
         glDeleteShader(vs);
         if(!ok) return false;
         glGenVertexArrays(1,&vao);
@@ -363,6 +373,21 @@ struct ContextState {
         if(!dof.Create(std::max(1,w>>1),std::max(1,h>>1),working)) return false;
         FX_LOG("FBO %dx%d, bloom=%s",w,h,caps.halfFloat ? "RGBA16F" : "RGBA8");
         return true;
+    }
+    // Created on first use and freed when TAA is switched off: no memory
+    // cost while the option is off. Same encoding as the scene copy. Out of
+    // GPU memory (texture-heavy maps) is transient: try again later.
+    bool TaaTargets(GLenum format) {
+        if(!taaProgram.id) return false;
+        if(taa[0].fbo && taaFormat==format) return true;
+        if(taaRetry) { --taaRetry;return false; }
+        DestroyTaa();
+        if(!taa[0].Create(width,height,format) || !taa[1].Create(width,height,format)) {
+            DestroyTaa();taaRetry=600;
+            FX_LOG("TAA buffers %dx%d unavailable (GPU memory), retry in 600 frames",width,height);
+            return false;
+        }
+        taaFormat=format;return true;
     }
     bool DepthStorage(GLenum format) {
         if(depthTexture && depthFormat==format) return true;
@@ -474,7 +499,7 @@ void Begin(const Target& t,const Program& p) {
 }
 void Draw() { glDrawArrays(GL_TRIANGLES,0,3); }
 void BloomPasses(ContextState& s,const Settings& cfg,bool decode) {
-    GLuint input=s.scene.texture;int iw=s.width,ih=s.height;
+    GLuint input=s.sceneInput;int iw=s.width,ih=s.height;
     for(int i=0;i<3;++i) {
         Begin(s.bloom[i],s.downsample);Texture(0,input);
         glUniform1i(s.downsample[Source],0);glUniform2f(s.downsample[Texel],1.0f/iw,1.0f/ih);
@@ -492,7 +517,7 @@ void BloomPasses(ContextState& s,const Settings& cfg,bool decode) {
 // the default-framebuffer copy of the fallback path); dw/dh: its size.
 void DepthPass(ContextState& s,const Settings& cfg,bool decode,GLuint depth,int dw,int dh) {
     const Program& p=s.depthEffects;Begin(s.effects,p);
-    Texture(0,s.scene.texture);Texture(1,depth);
+    Texture(0,s.sceneInput);Texture(1,depth);
     glUniform1i(p[Scene],0);glUniform1i(p[Depth],1);glUniform1i(p[Decode],decode);
     glUniformMatrix4fv(p[Projection],1,GL_FALSE,s.projection);
     glUniformMatrix4fv(p[InvProjection],1,GL_FALSE,s.inverse);
@@ -503,8 +528,8 @@ void DepthPass(ContextState& s,const Settings& cfg,bool decode,GLuint depth,int 
     glUniform2f(p[AOParams],cfg.aoStrength,cfg.aoRadius);Draw();
 }
 void AtmospherePass(ContextState& s,const LookProfile& look,bool decode,GLuint depth) {
-    const Program& p=s.atmosphereProgram;Begin(s.atmosphere,p);Texture(0,s.scene.texture);
-    Texture(1,depth ? depth : s.scene.texture);
+    const Program& p=s.atmosphereProgram;Begin(s.atmosphere,p);Texture(0,s.sceneInput);
+    Texture(1,depth ? depth : s.sceneInput);
     glUniform1i(p[Scene],0);glUniform1i(p[Depth],1);glUniform1i(p[HasDepth],depth!=0);
     glUniform1f(p[ClearDepth],s.clearDepth);
     glUniform1i(p[Decode],decode);glUniform4fv(p[Sun],1,look.sun);
@@ -618,7 +643,7 @@ void StatePass(ContextState& s,const Settings& cfg,bool decode,GLuint depth) {
     s.stateTime=now;
     const int write=s.stateIndex^1;
     const Program& p=s.stateProgram;Begin(s.state[write],p);
-    Texture(0,s.scene.texture);Texture(1,depth ? depth : s.scene.texture);Texture(2,s.state[s.stateIndex].texture);
+    Texture(0,s.sceneInput);Texture(1,depth ? depth : s.sceneInput);Texture(2,s.state[s.stateIndex].texture);
     glUniform1i(p[Scene],0);glUniform1i(p[Depth],1);glUniform1i(p[Source],2);
     glUniform1i(p[HasDepth],depth!=0);glUniform1i(p[Decode],decode);
     glUniform1f(p[ClearDepth],s.clearDepth);glUniform2fv(p[DepthRange],1,s.depthRange);
@@ -631,7 +656,7 @@ void StatePass(ContextState& s,const Settings& cfg,bool decode,GLuint depth) {
 }
 // Half-resolution blurred copy of the scene for depth of field.
 void DofPass(ContextState& s,bool decode) {
-    Begin(s.dof,s.downsample);Texture(0,s.scene.texture);
+    Begin(s.dof,s.downsample);Texture(0,s.sceneInput);
     glUniform1i(s.downsample[Source],0);glUniform2f(s.downsample[Texel],1.0f/s.width,1.0f/s.height);
     glUniform1i(s.downsample[Decode],decode);glUniform1i(s.downsample[Extract],0);
     glUniform2f(s.downsample[ThresholdKnee],1.0f,0.2f);Draw();
@@ -640,6 +665,23 @@ void DofPass(ContextState& s,bool decode) {
     Begin(s.dof,s.blur);Texture(0,s.ping[0].texture);
     glUniform2f(s.blur[Direction],0,1.6f/s.dof.height);Draw();
 }
+// Temporal AA into taa[write]; every later pass reads it. history=false
+// (camera cut, first frame) copies the scene and restarts the history.
+void TaaPass(ContextState& s,const Settings& cfg,GLuint depth,bool history) {
+    const int write=s.taaIndex^1;
+    const Program& p=s.taaProgram;Begin(s.taa[write],p);
+    Texture(0,s.scene.texture);Texture(1,s.taa[s.taaIndex].texture);Texture(2,depth);
+    glUniform1i(p[Scene],0);glUniform1i(p[Source],1);glUniform1i(p[Depth],2);
+    glUniform1i(p[HasDepth],1);glUniform1f(p[ClearDepth],s.clearDepth);
+    glUniform2fv(p[DepthRange],1,s.depthRange);
+    glUniformMatrix4fv(p[InvProjection],1,GL_FALSE,s.inverse);
+    glUniformMatrix4fv(p[InvView],1,GL_FALSE,s.invView);
+    glUniformMatrix4fv(p[PrevViewProj],1,GL_FALSE,s.motionPrev);
+    glUniform2f(p[Texel],1.0f/s.width,1.0f/s.height);
+    // Near fade 6 m: own car/character keeps its screen position (as motion blur).
+    glUniform4f(p[Taa],history && s.taaValid ? cfg.taaHistory : 0.0f,6.0f,0.0f,0.0f);Draw();
+    s.taaIndex=write;s.taaValid=true;s.sceneInput=s.taa[write].texture;
+}
 void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,int dw,int dh,bool decode,bool encode) {
     const bool depth=depthTexture!=0;
     const auto& cfg=look.config;
@@ -647,18 +689,19 @@ void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,i
     GLint oldDraw=GL_BACK;glGetIntegerv(GL_DRAW_BUFFER0,&oldDraw);
     const GLenum back=GL_BACK;glDrawBuffers(1,&back);
     glViewport(0,0,s.width,s.height);const Program& p=s.composite;glUseProgram(p.id);
-    Texture(0,s.scene.texture);Texture(1,s.bloom[0].texture);Texture(2,s.bloom[1].texture);
+    const GLuint scene=s.sceneInput;
+    Texture(0,scene);Texture(1,s.bloom[0].texture);Texture(2,s.bloom[1].texture);
     Texture(3,s.bloom[2].texture);Texture(4,s.effects.texture);
-    Texture(5,depth ? depthTexture : s.scene.texture);Texture(6,s.dirt);
+    Texture(5,depth ? depthTexture : scene);Texture(6,s.dirt);
     Texture(7,s.atmosphere.texture);glUniform1i(p[Atmosphere],7);
     const bool dofActive=depth && cfg.dofStrength>0.0f && s.stateValid;
     const bool lutActive=s.lut!=0 && cfg.lutStrength>0.0f;
-    Texture(8,s.state[s.stateIndex].texture);Texture(9,dofActive ? s.dof.texture : s.scene.texture);
-    Texture(10,lutActive ? s.lut : s.scene.texture);
+    Texture(8,s.state[s.stateIndex].texture);Texture(9,dofActive ? s.dof.texture : scene);
+    Texture(10,lutActive ? s.lut : scene);
     glUniform1i(p[State],8);glUniform1i(p[DofTex],9);glUniform1i(p[LUT],10);
-    Texture(11,s.wetUploaded ? s.wetPuddle : s.scene.texture);
-    Texture(12,s.wetUploaded ? s.wetRipple : s.scene.texture);
-    Texture(13,s.wetUploaded ? s.wetRelief : s.scene.texture);
+    Texture(11,s.wetUploaded ? s.wetPuddle : scene);
+    Texture(12,s.wetUploaded ? s.wetRipple : scene);
+    Texture(13,s.wetUploaded ? s.wetRelief : scene);
     glUniform1i(p[PuddleMask],11);glUniform1i(p[Ripple],12);glUniform1i(p[Relief],13);
     // World metres per texture repeat: puddle mask 40 m, rain rings 1.5 m, wind waves 4 m.
     glUniform4f(p[WetTex],s.wetUploaded ? 1.0f : 0.0f,1.0f/40.0f,1.0f/1.5f,1.0f/4.0f);
@@ -710,7 +753,7 @@ void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,i
 // Effects dropped first when the adaptive level rises (render thread).
 Settings AdaptiveSettings(Settings c) {
     const int level=GraphicsSettings::AdaptiveLevel();
-    if(level>=1) { c.ssao=false;c.ssr=false;c.motionBlur=0;c.dofStrength=0; }
+    if(level>=1) { c.ssao=false;c.ssr=false;c.motionBlur=0;c.dofStrength=0;c.taa=false; }
     if(level>=2) { c.sunShafts*=0.5f;c.lensFlare*=0.5f;c.clarity=0; }
     if(level>=3) { c.autoExposure=0;c.lutStrength=0; }
     return c;
@@ -866,7 +909,7 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
     bool srgb=false;GLenum color=DefaultColor(srgb);if(!color) return false;
     GLint samples=0;glGetIntegerv(GL_SAMPLES,&samples);
     const bool wantDepth=cfg.ssr || cfg.ssao || cfg.fogStrength>0 || cfg.skyStrength>0
-        || cfg.wetStrength>0 || cfg.sunShafts>0 || cfg.motionBlur>0 || cfg.dofStrength>0;
+        || cfg.wetStrength>0 || cfg.sunShafts>0 || cfg.motionBlur>0 || cfg.dofStrength>0 || cfg.taa;
     GLuint depthTexture=0;int depthWidth=w,depthHeight=h;
     s.haveView=false;
     if(beforeHud && wantDepth && haveWorld) {
@@ -912,6 +955,7 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
     glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_COLOR_BUFFER_BIT,GL_NEAREST);
     if(windowDepth) glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
     glReadBuffer(static_cast<GLenum>(oldRead));
+    s.sceneInput=s.scene.texture;
     const bool decode=cfg.sourceIsSRGB && !srgb;
     // Motion blur: previous camera of this context. A cut (teleport, respawn,
     // camera switch: > 8 m or > 25 degrees in one frame) blurs nothing.
@@ -932,6 +976,12 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
         std::copy(vp,vp+16,s.prevViewProj);std::copy(eye,eye+3,s.prevEye);std::copy(forward,forward+3,s.prevForward);
         s.havePrev=true;
     } else s.havePrev=false;
+    // TAA needs this frame's world depth + camera and last frame's camera.
+    const bool taaOn=cfg.taa && cfg.taaHistory>0.0f;
+    if(!taaOn) { if(s.taa[0].fbo) s.DestroyTaa(); }
+    else if(depthTexture && s.haveView && haveWorld && s.TaaTargets(srgb ? GL_SRGB8_ALPHA8 : GL_RGBA8))
+        TaaPass(s,cfg,depthTexture,s.motionActive);
+    else s.taaValid=false;
     EnsureLut(s,cfg);
     EnsureWetTextures(s,cfg);
     BloomPasses(s,cfg,decode);
@@ -1150,6 +1200,7 @@ bool InstallHooks() {
         WorldSunShadow::InstallDrawHooks(backendHook);
         TextureFilter::InstallHooks(backendHook);
         WorldMsaa::InstallHooks(backendHook);
+        ShaderTweaks::InstallHooks();
         WorldSunShadow::RequestWorldDepth(GetSettings().enabled);
         FX_LOG("EGL postFX SUN4 installed via ShadowHook; no AML, no RenderWare offset changes");
     });
@@ -1172,6 +1223,7 @@ void SetSettings(const Settings& input) {
     c.fogStrength=Clamp(c.fogStrength,0,1,0.65f);
     c.skyStrength=Clamp(c.skyStrength,0,1,0.35f);c.wetStrength=Clamp(c.wetStrength,0,1.5f,1.0f);
     c.motionBlur=Clamp(c.motionBlur,0,1,0);c.dofStrength=Clamp(c.dofStrength,0,1,0);
+    c.taaHistory=Clamp(c.taaHistory,0,0.95f,0.85f);
     c.autoExposure=Clamp(c.autoExposure,0,1,0.25f);c.aeKey=Clamp(c.aeKey,0.01f,1,0.11f);
     c.aeMin=Clamp(c.aeMin,0.1f,4,0.5f);c.aeMax=Clamp(c.aeMax,c.aeMin,4,2.5f);c.aeSpeed=Clamp(c.aeSpeed,0.05f,10,1.5f);
     c.hazeDensity=Clamp(c.hazeDensity,0,0.05f,0.001f);c.hazeUniform=Clamp(c.hazeUniform,0,0.05f,0.0005f);
