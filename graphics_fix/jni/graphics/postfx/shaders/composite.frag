@@ -48,6 +48,10 @@ uniform vec4 uMotion;       // strength, max length (uv), near fade metres, enab
 uniform mat4 uPrevViewProj; // world -> previous frame clip
 uniform vec4 uLut;          // strength, size, 0, enabled
 uniform vec4 uFinish;       // film grain, dither, grading strength, 0
+uniform sampler2D uPuddleMask; // TESTLIT/graphics/textures/NoisePd.png (r)
+uniform sampler2D uRipple;     // Ripples.png normal xy + RipplesAlpha ring, phase
+uniform sampler2D uRelief;     // PuddlesRelief.png normal xy (wind on puddles)
+uniform vec4 uWetTex;          // textures loaded, puddle scale, ripple scale, relief scale
 #include "reference_color.glsl"
 float viewDepth(vec2 uv) {
     float z=(texture(uDepth,uv).r-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
@@ -90,12 +94,12 @@ float ripple(vec2 p,float t) {
     float d=length(f-o*0.6)-phase*0.5;
     return exp(-d*d*576.0)*(1.0-phase);
 }
-vec4 effects() {
+vec4 effects(vec2 at) {
     if(uHasDepth==0) return vec4(0,0,0,1);
     // Depth-aware 4-tap upsample untuk mengurangi halo half-resolution.
-    float center=viewDepth(vUV);
-    vec2 base=floor(vUV*uEffectSize-0.5);
-    vec2 fraction=fract(vUV*uEffectSize-0.5);
+    float center=viewDepth(at);
+    vec2 base=floor(at*uEffectSize-0.5);
+    vec2 fraction=fract(at*uEffectSize-0.5);
     vec4 sum=vec4(0);float total=0.0;
     for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
         vec2 uv=(base+vec2(x,y)+0.5)/uEffectSize;
@@ -126,15 +130,28 @@ vec3 fxaaScene(vec2 uv) {
     float lb=luma(b);
     return (lb<lmin||lb>lmax) ? a : b;
 }
-// Wet asphalt and puddles on flat ground. Returns the reflection multiplier.
-float wetSurface(inout vec3 c) {
+// Rain drop rings from the ripple texture (Lagarde): b = ring profile,
+// a = time offset per drop, rg = ring normal. Returns normal xy and ring strength.
+vec3 textureRipple(vec2 p,float t) {
+    vec4 r=texture(uRipple,p);
+    float drop=fract(r.a+t);
+    float ring=drop-1.0+r.b;
+    float factor=clamp(0.2+uWet.y*0.8-drop,0.0,1.0)*r.b*sin(clamp(ring*9.0,0.0,3.0)*3.14159265);
+    return vec3((r.rg*2.0-1.0)*factor*0.35,abs(factor));
+}
+// Wet asphalt and puddles on flat ground. Returns the reflection multiplier;
+// distort = screen offset for the reflection (ripples, wind on puddles).
+float wetSurface(inout vec3 c,out vec2 distort) {
+    distort=vec2(0.0);
     vec3 p=viewPosition(vUV);
     float distance=length(p);
     vec3 n=mat3(uInvView)*viewNormal(vUV,p);
     float flatness=smoothstep(0.80,0.95,n.z)*(1.0-smoothstep(60.0,140.0,distance));
     if(flatness<=0.0) return 1.0;
     vec3 world=(uInvView*vec4(p,1.0)).xyz;
-    float noise=valueNoise(world.xy*0.18)*0.65+valueNoise(world.xy*0.55+17.3)*0.35;
+    bool textured=uWetTex.x>0.5;
+    float noise=textured ? texture(uPuddleMask,world.xy*uWetTex.y).r*0.8+valueNoise(world.xy*0.55+17.3)*0.2
+                         : valueNoise(world.xy*0.18)*0.65+valueNoise(world.xy*0.55+17.3)*0.35;
     float puddle=smoothstep(1.0-uWet.z,1.0-uWet.z+0.12,noise)*uWet.x*flatness;
     float damp=uWet.x*flatness;
     c*=mix(1.0,0.72,damp);   // wet asphalt is darker
@@ -142,7 +159,19 @@ float wetSurface(inout vec3 c) {
     vec3 toEye=normalize(mat3(uInvView)*(-p));
     float fresnel=0.02+0.98*pow(1.0-clamp(toEye.z,0.0,1.0),5.0);
     vec3 skyColour=mix(uSkyHorizon.rgb,uSkyZenith.rgb,0.3);
-    float rings=uWet.y>0.01 ? ripple(world.xy,uTime)+ripple(world.xy+vec2(0.37,0.71),uTime*1.13) : 0.0;
+    float rings=0.0;
+    if(textured) {
+        vec2 wave=(texture(uRelief,world.xy*uWetTex.w+uTime*vec2(0.021,0.013)).rg*2.0-1.0)*0.25;
+        vec2 n=wave;
+        if(uWet.y>0.01) {
+            vec3 a=textureRipple(world.xy*uWetTex.z,uTime*0.9);
+            vec3 b=textureRipple(world.xy*uWetTex.z+vec2(0.37,0.71),uTime*0.9+0.5);
+            n+=a.xy+b.xy;rings=(a.z+b.z)*0.6;
+        }
+        distort=n*0.018*puddle;
+    } else if(uWet.y>0.01) {
+        rings=ripple(world.xy,uTime)+ripple(world.xy+vec2(0.37,0.71),uTime*1.13);
+    }
     c+=skyColour*(fresnel*puddle*0.6+rings*puddle*uWet.y*0.25);
     return 1.0+uWet.w*puddle+0.5*damp;
 }
@@ -202,7 +231,6 @@ void main() {
     vec3 local=(scene(vUV+vec2(uTexel.x,0))+scene(vUV-vec2(uTexel.x,0))
         +scene(vUV+vec2(0,uTexel.y))+scene(vUV-vec2(0,uTexel.y)))*0.25;
     c=max(c+clamp((luma(c)-luma(local))*uDetail.x,-0.035,0.035),vec3(0));
-    vec4 fx=effects();
     bool geometry=uHasDepth!=0 && abs(texture(uDepth,vUV).r-uClearDepth)>0.0000002;
     float depthMetres=geometry ? viewDepth(vUV) : 1.0e5;
     vec4 state=texture(uState,vec2(0.5));
@@ -213,7 +241,10 @@ void main() {
         float coc=uDof.x*smoothstep(start,start+max(focus*2.0,25.0),depthMetres);
         c=mix(c,texture(uDofTex,vUV).rgb,coc);
     }
-    float reflection=geometry && uWet.x>0.01 ? wetSurface(c) : 1.0;
+    vec2 distort=vec2(0.0);
+    float reflection=geometry && uWet.x>0.01 ? wetSurface(c,distort) : 1.0;
+    vec4 fx=effects(vUV);
+    if(dot(distort,distort)>0.0) fx.rgb=effects(clamp(vUV+distort,vec2(0.001),vec2(0.999))).rgb;
     c=c*fx.a+fx.rgb*reflection;
     if(geometry) {
         float distance=max(depthMetres-8.0,0.0);

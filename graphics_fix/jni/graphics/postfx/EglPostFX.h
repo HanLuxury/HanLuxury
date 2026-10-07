@@ -77,6 +77,9 @@ struct Settings {
     float nightThreshold = 0.52f; // Ambang bloom malam relatif ke siang.
     float nightGlow = 1.0f;       // Pengali bloom malam.
     bool lowMemory = false;       // HP RAM kecil: target 8-bit, tanpa buffer tambahan.
+    // Folder tekstur jalan basah (NoisePd/Ripples/RipplesAlpha/PuddlesRelief.png).
+    // Kosong atau file tidak ada = genangan/riak prosedural seperti sebelumnya.
+    char textureDir[192] = {};
     int lightCount = 0; // No fixed glowing spot pasted over the game by default.
     std::array<ScreenLight, 4> lights{};
 };

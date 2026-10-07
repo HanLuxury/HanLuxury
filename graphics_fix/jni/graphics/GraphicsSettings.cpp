@@ -99,6 +99,7 @@ void LoadTuning() {
     // contrast, sunlit haze, gentle eye adaptation.
     fx.toneMix=0.5f;fx.exposure=1.0f;fx.saturation=1.02f;fx.contrast=0.95f;
     if(!g_pszStorage) return;
+    std::snprintf(fx.textureDir,sizeof(fx.textureDir),"%sgraphics/textures/",g_pszStorage);
     char path[256];
     std::snprintf(path,sizeof(path),"%sgraphics/ZyZGfx.ini",g_pszStorage);
     ini_table_s* t=ini_table_create();

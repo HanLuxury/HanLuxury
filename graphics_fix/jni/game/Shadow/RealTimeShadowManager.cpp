@@ -6,6 +6,8 @@
 #include "util/patch.h"
 #include "Entity/Ped/Ped.h"
 #include "Mobile/MobileSettings/MobileSettings.h"
+#include "Models/ModelInfo.h"
+#include "Camera.h"
 #include "modloader/HookScope.h"
 #include <cstddef>
 
@@ -51,6 +53,18 @@ void CRealTimeShadowManager::DoShadowThisFrame(CPhysical* physical) {
         && static_cast<CPed*>(physical)->m_nPedType == PEDTYPE_PLAYER1;
     if (!localPlayer && CMobileSettings::ms_MobileSettings[MS_Shadows].value != 2) {
         return;
+    }
+    // Real-time shadows for everyone (MS_Shadows == 2): each one renders the
+    // ped/vehicle again into a 256 px raster every frame. Skip the ones whose
+    // shadow cannot reach the screen (bounding sphere grown 3x + 2 m for long
+    // low-sun shadows). The local player always keeps its shadow.
+    if (!localPlayer) {
+        CBaseModelInfo* info = CModelInfo::GetModelInfo(physical->m_nModelIndex);
+        CColModel* col = info ? info->GetColModel() : nullptr;
+        const float radius = col ? col->GetBoundRadius() : 2.0f;
+        CVector centre;
+        physical->GetBoundCentre(centre);
+        if (!CCamera::Get().IsSphereVisible(&centre, radius * 3.0f + 2.0f)) return;
     }
     if (const auto shdw = physical->m_pShadowData) {
         shdw->m_bKeepAlive = true;

@@ -1,4 +1,4 @@
-PERBAIKAN GRAFIS (TAHAP 1 - 4) + VICE CITY - GTA SA Android 2.10 arm64, TANPA AML
+PERBAIKAN GRAFIS (TAHAP 1 - 5) + VICE CITY - GTA SA Android 2.10 arm64, TANPA AML
 ==================================================================================
 Ini perbaikan pada sistem grafis YANG SUDAH ADA di source Anda
 (graphics/postfx, graphics/sun, game/Shadow, menu GRAFIS). Tidak ada engine
@@ -137,8 +137,9 @@ Tampilan seperti foto (bawaan, bisa diatur di ZyZGfx.ini):
 34. ZyZGfx.ini Anda dibaca dari TESTLIT/graphics/ZyZGfx.ini. Bagian yang
     belum dipakai client ini tertulis di kepala file (HDR, TAA, Vehicle,
     Water, Lighting, Wind, Relief, Surfaces, Rain, ExperimentalLights).
-    Tekstur di graphics/textures/ (Rain.png, Ripples.png, dll.) belum
-    dipakai client ini.
+    Tekstur jalan basah dipakai mulai tahap 5 (lihat 39). Rain.png,
+    Rain2.png, RainCar.png, RainNormal.png, WaterFoam.png, bump.png dan
+    lainnya belum dipakai client ini.
 Fitur baru (menu GRAFIS):
 35. MSAA 2x/4x: render target dunia GTA dibuat multisample (extension
     EXT_multisampled_render_to_texture, murah di Mali/Adreno). Kalau GPU
@@ -153,6 +154,18 @@ PENTING jika build Anda juga berisi engine EAGLE (logOutput.log menulis
 "EAGLE GraphicsEngine"): jangan nyalakan dua bayangan sekaligus (bayangan
 dobel, berat untuk RAM kecil). Matikan [Shadow] bEnabled di
 graphics/Config.ini, ATAU menu "Bayangan matahari".
+
+TAHAP 5
+-------
+39. Jalan basah memakai tekstur Anda (TESTLIT/graphics/textures/):
+    NoisePd.png = sebaran genangan (berulang tiap 40 m), Ripples.png +
+    RipplesAlpha.png = cincin tetes hujan (1.5 m), PuddlesRelief.png =
+    riak angin (4 m). Pantulan di genangan ikut bergoyang. Didekode di
+    thread lain (tidak patah-patah saat hujan mulai), HP RAM kecil memakai
+    masker setengah ukuran. File tidak ada = genangan prosedural lama.
+40. Bayangan real-time NPC/kendaraan (setelan GTA Shadows = real-time
+    semua) tidak digambar lagi kalau bayangannya tidak mungkin terlihat
+    di layar (SHD-05). Bayangan pemain selalu ada. Hemat GPU saat ramai.
 
 VICE CITY (file kiriman Anda)
 -----------------------------
@@ -194,6 +207,8 @@ dan Anisotropic dibuat di tahap 4 (lihat di atas). FXAA di tahap 2.
 
 STATUS PENGECEKAN
 -----------------
+- Tahap 5: EglPostFX.cpp, GraphicsSettings.cpp, RealTimeShadowManager.cpp
+  lolos syntax-check aarch64; 15 shader + 5 link lolos glslang.
 - Tahap 4: 36 file C++ yang diubah lolos syntax-check aarch64; 15 shader
   GLSL + 7 link lolos glslang; Kotlin lolos; ZyZGfx.ini dites parser.
 - Tahap 3: 26 file C++ (termasuk modul Vice City) lolos syntax-check
@@ -224,6 +239,5 @@ Kirim isi /sdcard/TESTLIT/crash_native.txt LENGKAP (baris fault, pc, lr dan
 
 BELUM DIKERJAKAN (tahap berikut)
 --------------------------------
-- Culling bayangan RT di tepi layar (SHD-05).
 - Mipmap PowerVR (tekstur shimmer di GPU PowerVR).
 - VSync (diatur Android/EGL), TAA, shader kendaraan/air dari ZyZGfx.ini.

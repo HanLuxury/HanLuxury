@@ -25,12 +25,15 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <string>
+#include <thread>
 #include <utility>
+#include <vector>
 
 #define FX_LOG(...) __android_log_print(ANDROID_LOG_INFO,"EglPostFX",__VA_ARGS__)
 namespace EglPostFX {
 namespace {
-constexpr unsigned kUnits=12;
+constexpr unsigned kUnits=14;
 constexpr GLenum kSRGBWrite=0x8DB9; // GL_FRAMEBUFFER_SRGB_EXT.
 using SwapFn=EGLBoolean(EGLAPIENTRY*)(EGLDisplay,EGLSurface);
 using DamageFn=EGLBoolean(EGLAPIENTRY*)(EGLDisplay,EGLSurface,const EGLint*,EGLint);
@@ -185,7 +188,7 @@ enum Uniform { Source,Texel,Decode,Extract,ThresholdKnee,Direction,Scene,Depth,
     EffectSize,LightCount,LightPosition,LightColor,Time,Aspect,Detail,ShadowTint,
     HighlightTint,Fog,Sun,Atmosphere,InvView,SunDirection,SkyZenith,SkyHorizon,SunColor,
     Wet,DepthTexel,FXAA,State,DofTex,LUT,Haze,HazeBase,AutoExposure,Dof,Motion,
-    PrevViewProj,Lut,Finish,Rays,Adapt,Focus,UniformCount };
+    PrevViewProj,Lut,Finish,Rays,Adapt,Focus,PuddleMask,Ripple,Relief,WetTex,UniformCount };
 constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract",
     "uThresholdKnee","uDirection","uScene","uDepth","uProjection","uInvProjection",
     "uDepthRange","uClearDepth","uForwardSign","uSSR","uAO","uSSRParams","uAOParams",
@@ -195,7 +198,7 @@ constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract
     "uFog","uSun","uAtmosphere","uInvView","uSunDirection","uSkyZenith","uSkyHorizon",
     "uSunColor","uWet","uDepthTexel","uFXAA","uState","uDofTex","uLUT","uHaze",
     "uHazeBase","uAutoExposure","uDof","uMotion","uPrevViewProj","uLut","uFinish","uRays",
-    "uAdapt","uFocus"};
+    "uAdapt","uFocus","uPuddleMask","uRipple","uRelief","uWetTex"};
 static_assert(sizeof(uniformNames)/sizeof(uniformNames[0])==UniformCount);
 struct Program {
     GLuint id=0;GLint location[UniformCount]{};
@@ -291,6 +294,7 @@ struct ContextState {
     // Motion blur: previous frame camera (world -> clip) and eye/forward for cut detection.
     float prevViewProj[16]{},prevEye[3]{},prevForward[3]{};bool havePrev=false,motionActive=false;
     float motionPrev[16]{};
+    GLuint wetPuddle=0,wetRipple=0,wetRelief=0;bool wetUploaded=false;
     float projection[16]{},inverse[16]{},depthRange[2]{0,1},clearDepth=1,forwardSign=-1;
     void DestroyTargets() {
         // Scene FBO owns an attachment reference: delete it before the depth texture.
@@ -305,6 +309,9 @@ struct ContextState {
         atmosphereProgram.Destroy();stateProgram.Destroy();compat.Destroy();
         if(lut) glDeleteTextures(1,&lut);
         lut=0;lutSize=0;lutLoaded[0]=0;lutTried=false;
+        GLuint wet[3]={wetPuddle,wetRipple,wetRelief};
+        for(GLuint t:wet) if(t) glDeleteTextures(1,&t);
+        wetPuddle=wetRipple=wetRelief=0;wetUploaded=false;
         if(vao) glDeleteVertexArrays(1,&vao);if(dirt) glDeleteTextures(1,&dirt);
         vao=dirt=0;ready=false;processedBeforeHud=false;
     }
@@ -529,6 +536,81 @@ void EnsureLut(ContextState& s,const Settings& cfg) {
     s.lutSize=h;
     FX_LOG("LUT loaded: %s (%d)",cfg.lutPath,h);
 }
+// Wet-road textures from the player's graphics folder, decoded once on a
+// background thread (no hitch when the rain starts), uploaded per context.
+struct WetTextureData {
+    std::atomic<int> state{0}; // 0 not started, 1 loading, 2 ready, 3 unavailable
+    std::vector<unsigned char> puddle,ripple,relief;
+    int puddleSize=0,rippleSize=0,reliefSize=0;
+};
+WetTextureData wetData;
+std::vector<unsigned char> LoadChannels(const std::string& path,int wanted,int& w,int& h) {
+    int n=0;unsigned char* pixels=stbi_load(path.c_str(),&w,&h,&n,4);
+    std::vector<unsigned char> out;
+    if(!pixels) return out;
+    out.resize(size_t(w)*size_t(h)*size_t(wanted));
+    for(size_t i=0,count=size_t(w)*size_t(h);i<count;++i)
+        for(int c=0;c<wanted;++c) out[i*size_t(wanted)+size_t(c)]=pixels[i*4+size_t(c)];
+    stbi_image_free(pixels);
+    return out;
+}
+void StartWetTextures(const char* dir,bool lowMemory) {
+    int idle=0;
+    if(!dir[0] || !wetData.state.compare_exchange_strong(idle,1)) return;
+    std::string base=dir;
+    try {
+        std::thread([base,lowMemory] {
+            int pw=0,ph=0,rw=0,rh=0,aw=0,ah=0,lw=0,lh=0;
+            auto puddle=LoadChannels(base+"NoisePd.png",1,pw,ph);
+            auto ripple=LoadChannels(base+"Ripples.png",2,rw,rh);
+            auto alpha=LoadChannels(base+"RipplesAlpha.png",2,aw,ah);
+            auto relief=LoadChannels(base+"PuddlesRelief.png",2,lw,lh);
+            if(puddle.empty() || ripple.empty() || alpha.empty() || relief.empty() ||
+               pw!=ph || rw!=aw || rh!=ah || lw!=lh) {
+                FX_LOG("wet road textures not found in %s, procedural puddles",base.c_str());
+                wetData.state.store(3);return;
+            }
+            if(lowMemory && pw>=512) { // halve the 1024^2 mask: 256 KB instead of 1 MB
+                std::vector<unsigned char> half(size_t(pw/2)*size_t(ph/2));
+                for(int y=0;y<ph/2;++y) for(int x=0;x<pw/2;++x) {
+                    const size_t i=size_t(y*2)*size_t(pw)+size_t(x*2);
+                    half[size_t(y)*size_t(pw/2)+size_t(x)]=static_cast<unsigned char>(
+                        (puddle[i]+puddle[i+1]+puddle[i+size_t(pw)]+puddle[i+size_t(pw)+1]+2)/4);
+                }
+                puddle.swap(half);pw/=2;
+            }
+            std::vector<unsigned char> rippleRGBA(size_t(rw)*size_t(rh)*4);
+            for(size_t i=0,count=size_t(rw)*size_t(rh);i<count;++i) {
+                rippleRGBA[i*4]=ripple[i*2];rippleRGBA[i*4+1]=ripple[i*2+1];
+                rippleRGBA[i*4+2]=alpha[i*2];rippleRGBA[i*4+3]=alpha[i*2+1];
+            }
+            wetData.puddle.swap(puddle);wetData.puddleSize=pw;
+            wetData.ripple.swap(rippleRGBA);wetData.rippleSize=rw;
+            wetData.relief.swap(relief);wetData.reliefSize=lw;
+            wetData.state.store(2,std::memory_order_release);
+            FX_LOG("wet road textures loaded from %s",base.c_str());
+        }).detach();
+    } catch(...) { wetData.state.store(3); }
+}
+GLuint UploadWetTexture(const std::vector<unsigned char>& data,int size,GLenum internal,GLenum format) {
+    GLuint id=0;glGenTextures(1,&id);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,id);
+    glTexImage2D(GL_TEXTURE_2D,0,internal,size,size,0,format,GL_UNSIGNED_BYTE,data.data());
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
+    return id;
+}
+void EnsureWetTextures(ContextState& s,const Settings& cfg) {
+    if(s.wetUploaded || cfg.wetStrength<=0.0f) return;
+    StartWetTextures(cfg.textureDir,cfg.lowMemory);
+    if(wetData.state.load(std::memory_order_acquire)!=2) return;
+    s.wetPuddle=UploadWetTexture(wetData.puddle,wetData.puddleSize,GL_R8,GL_RED);
+    s.wetRipple=UploadWetTexture(wetData.ripple,wetData.rippleSize,GL_RGBA8,GL_RGBA);
+    s.wetRelief=UploadWetTexture(wetData.relief,wetData.reliefSize,GL_RG8,GL_RG);
+    s.wetUploaded=true;
+}
 // 1x1 state: eye adaptation and the auto-focus distance, eased over time.
 void StatePass(ContextState& s,const Settings& cfg,bool decode,GLuint depth) {
     const auto now=std::chrono::steady_clock::now();
@@ -574,6 +656,12 @@ void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,i
     Texture(8,s.state[s.stateIndex].texture);Texture(9,dofActive ? s.dof.texture : s.scene.texture);
     Texture(10,lutActive ? s.lut : s.scene.texture);
     glUniform1i(p[State],8);glUniform1i(p[DofTex],9);glUniform1i(p[LUT],10);
+    Texture(11,s.wetUploaded ? s.wetPuddle : s.scene.texture);
+    Texture(12,s.wetUploaded ? s.wetRipple : s.scene.texture);
+    Texture(13,s.wetUploaded ? s.wetRelief : s.scene.texture);
+    glUniform1i(p[PuddleMask],11);glUniform1i(p[Ripple],12);glUniform1i(p[Relief],13);
+    // World metres per texture repeat: puddle mask 40 m, rain rings 1.5 m, wind waves 4 m.
+    glUniform4f(p[WetTex],s.wetUploaded ? 1.0f : 0.0f,1.0f/40.0f,1.0f/1.5f,1.0f/4.0f);
     glUniform1i(p[Scene],0);glUniform1i(p[Bloom0],1);glUniform1i(p[Bloom1],2);
     glUniform1i(p[Bloom2],3);glUniform1i(p[Effects],4);glUniform1i(p[Depth],5);glUniform1i(p[Dirt],6);
     glUniform1i(p[HasDepth],depth);glUniform1i(p[Decode],decode);glUniform1i(p[Encode],encode);
@@ -845,6 +933,7 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
         s.havePrev=true;
     } else s.havePrev=false;
     EnsureLut(s,cfg);
+    EnsureWetTextures(s,cfg);
     BloomPasses(s,cfg,decode);
     if(cfg.autoExposure>0 || cfg.dofStrength>0) StatePass(s,cfg,decode,depthTexture);
     else s.stateValid=false;
@@ -1092,6 +1181,7 @@ void SetSettings(const Settings& input) {
     c.rayLength=Clamp(c.rayLength,0.2f,1,0.88f);c.rayDecay=Clamp(c.rayDecay,0.8f,0.999f,0.965f);
     c.grain=Clamp(c.grain,0,1,0);c.dither=Clamp(c.dither,0,4,1);c.gradeStrength=Clamp(c.gradeStrength,0,1,1);
     c.lutStrength=Clamp(c.lutStrength,0,1,1);c.lutPath[sizeof(c.lutPath)-1]=0;
+    c.textureDir[sizeof(c.textureDir)-1]=0;
     c.wetReflection=Clamp(c.wetReflection,0,3,1);c.wetPuddles=Clamp(c.wetPuddles,0,2,1);
     c.wetRipples=Clamp(c.wetRipples,0,2,1);c.wetForce=Clamp(c.wetForce,0,1,0);
     c.nightThreshold=Clamp(c.nightThreshold,0.1f,1,0.52f);c.nightGlow=Clamp(c.nightGlow,0,4,1);

@@ -889,15 +889,17 @@ index 22c5fca..ed9fe91 100644
  
      // CHook::Redirect("_ZN9CRenderer9ScanWorldEv", &ScanWorld); // WARNING: FPS drop
 diff --git a/game/Shadow/RealTimeShadowManager.cpp b/game/Shadow/RealTimeShadowManager.cpp
-index e69e15d..1388a90 100644
+index e69e15d..6325894 100644
 --- a/game/Shadow/RealTimeShadowManager.cpp
 +++ b/game/Shadow/RealTimeShadowManager.cpp
-@@ -4,6 +4,15 @@
+@@ -4,6 +4,17 @@
  
  #include "RealTimeShadowManager.h"
  #include "util/patch.h"
 +#include "Entity/Ped/Ped.h"
 +#include "Mobile/MobileSettings/MobileSettings.h"
++#include "Models/ModelInfo.h"
++#include "Camera.h"
 +#include "modloader/HookScope.h"
 +#include <cstddef>
 +
@@ -908,7 +910,7 @@ index e69e15d..1388a90 100644
   
  void CRealTimeShadowManager::ReturnRealTimeShadow(CRealTimeShadow *shdw) {
      if (shdw->m_pOwner) {
-@@ -33,6 +42,16 @@ void CRealTimeShadowManager::DoShadowThisFrame(CPhysical* physical) {
+@@ -33,6 +44,28 @@ void CRealTimeShadowManager::DoShadowThisFrame(CPhysical* physical) {
  //            return;
  //    }
  
@@ -922,10 +924,22 @@ index e69e15d..1388a90 100644
 +    if (!localPlayer && CMobileSettings::ms_MobileSettings[MS_Shadows].value != 2) {
 +        return;
 +    }
++    // Real-time shadows for everyone (MS_Shadows == 2): each one renders the
++    // ped/vehicle again into a 256 px raster every frame. Skip the ones whose
++    // shadow cannot reach the screen (bounding sphere grown 3x + 2 m for long
++    // low-sun shadows). The local player always keeps its shadow.
++    if (!localPlayer) {
++        CBaseModelInfo* info = CModelInfo::GetModelInfo(physical->m_nModelIndex);
++        CColModel* col = info ? info->GetColModel() : nullptr;
++        const float radius = col ? col->GetBoundRadius() : 2.0f;
++        CVector centre;
++        physical->GetBoundCentre(centre);
++        if (!CCamera::Get().IsSphereVisible(&centre, radius * 3.0f + 2.0f)) return;
++    }
      if (const auto shdw = physical->m_pShadowData) {
          shdw->m_bKeepAlive = true;
      } else {
-@@ -59,7 +78,22 @@ inline void DoShadowThisFrame_hook(CRealTimeShadowManager* thiz, CPhysical *phys
+@@ -59,7 +92,22 @@ inline void DoShadowThisFrame_hook(CRealTimeShadowManager* thiz, CPhysical *phys
      thiz->DoShadowThisFrame(physical);
  }
  
@@ -1703,10 +1717,10 @@ index 6e92bdc..577f5f9 100644
  
 diff --git a/graphics/GraphicsSettings.cpp b/graphics/GraphicsSettings.cpp
 new file mode 100644
-index 0000000..87875ca
+index 0000000..36fe87a
 --- /dev/null
 +++ b/graphics/GraphicsSettings.cpp
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,345 @@
 +#include "GraphicsSettings.h"
 +#include "postfx/EglPostFX.h"
 +#include "sun/WorldSunShadow.h"
@@ -1808,6 +1822,7 @@ index 0000000..87875ca
 +    // contrast, sunlit haze, gentle eye adaptation.
 +    fx.toneMix=0.5f;fx.exposure=1.0f;fx.saturation=1.02f;fx.contrast=0.95f;
 +    if(!g_pszStorage) return;
++    std::snprintf(fx.textureDir,sizeof(fx.textureDir),"%sgraphics/textures/",g_pszStorage);
 +    char path[256];
 +    std::snprintf(path,sizeof(path),"%sgraphics/ZyZGfx.ini",g_pszStorage);
 +    ini_table_s* t=ini_table_create();
@@ -2759,7 +2774,7 @@ index 0000000..c719ca1
 +void SetLevel(int level);
 +} // namespace WorldMsaa
 diff --git a/graphics/postfx/EglPostFX.cpp b/graphics/postfx/EglPostFX.cpp
-index 1241bfe..1cd5553 100644
+index 1241bfe..183540d 100644
 --- a/graphics/postfx/EglPostFX.cpp
 +++ b/graphics/postfx/EglPostFX.cpp
 @@ -3,6 +3,12 @@
@@ -2775,16 +2790,24 @@ index 1241bfe..1cd5553 100644
  #include <EGL/egl.h>
  #include <EGL/eglext.h>
  #include <GLES3/gl3.h>
-@@ -24,7 +30,7 @@
+@@ -19,12 +25,15 @@
+ #include <memory>
+ #include <mutex>
+ #include <new>
++#include <string>
++#include <thread>
+ #include <utility>
++#include <vector>
+ 
  #define FX_LOG(...) __android_log_print(ANDROID_LOG_INFO,"EglPostFX",__VA_ARGS__)
  namespace EglPostFX {
  namespace {
 -constexpr unsigned kUnits=8;
-+constexpr unsigned kUnits=12;
++constexpr unsigned kUnits=14;
  constexpr GLenum kSRGBWrite=0x8DB9; // GL_FRAMEBUFFER_SRGB_EXT.
  using SwapFn=EGLBoolean(EGLAPIENTRY*)(EGLDisplay,EGLSurface);
  using DamageFn=EGLBoolean(EGLAPIENTRY*)(EGLDisplay,EGLSurface,const EGLint*,EGLint);
-@@ -40,15 +46,21 @@ DestroyContextFn realDestroyContext=nullptr;
+@@ -40,15 +49,21 @@ DestroyContextFn realDestroyContext=nullptr;
  DestroySurfaceFn realDestroySurface=nullptr;
  ReleaseFn realReleaseThread=nullptr;
  GetProcFn realGetProc=nullptr;
@@ -2809,14 +2832,14 @@ index 1241bfe..1cd5553 100644
  
  template<class T> T Proc(const char* name) {
      return reinterpret_cast<T>(realGetProc ? realGetProc(name) : eglGetProcAddress(name));
-@@ -171,14 +183,19 @@ enum Uniform { Source,Texel,Decode,Extract,ThresholdKnee,Direction,Scene,Depth,
+@@ -171,14 +186,19 @@ enum Uniform { Source,Texel,Decode,Extract,ThresholdKnee,Direction,Scene,Depth,
      Projection,InvProjection,DepthRange,ClearDepth,ForwardSign,SSR,AO,SSRParams,
      AOParams,Bloom0,Bloom1,Bloom2,Effects,Dirt,HasDepth,Encode,Grade,BloomDirt,
      EffectSize,LightCount,LightPosition,LightColor,Time,Aspect,Detail,ShadowTint,
 -    HighlightTint,Fog,Sun,Atmosphere,UniformCount };
 +    HighlightTint,Fog,Sun,Atmosphere,InvView,SunDirection,SkyZenith,SkyHorizon,SunColor,
 +    Wet,DepthTexel,FXAA,State,DofTex,LUT,Haze,HazeBase,AutoExposure,Dof,Motion,
-+    PrevViewProj,Lut,Finish,Rays,Adapt,Focus,UniformCount };
++    PrevViewProj,Lut,Finish,Rays,Adapt,Focus,PuddleMask,Ripple,Relief,WetTex,UniformCount };
  constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract",
      "uThresholdKnee","uDirection","uScene","uDepth","uProjection","uInvProjection",
      "uDepthRange","uClearDepth","uForwardSign","uSSR","uAO","uSSRParams","uAOParams",
@@ -2827,11 +2850,11 @@ index 1241bfe..1cd5553 100644
 +    "uFog","uSun","uAtmosphere","uInvView","uSunDirection","uSkyZenith","uSkyHorizon",
 +    "uSunColor","uWet","uDepthTexel","uFXAA","uState","uDofTex","uLUT","uHaze",
 +    "uHazeBase","uAutoExposure","uDof","uMotion","uPrevViewProj","uLut","uFinish","uRays",
-+    "uAdapt","uFocus"};
++    "uAdapt","uFocus","uPuddleMask","uRipple","uRelief","uWetTex"};
  static_assert(sizeof(uniformNames)/sizeof(uniformNames[0])==UniformCount);
  struct Program {
      GLuint id=0;GLint location[UniformCount]{};
-@@ -236,28 +253,58 @@ struct Target {
+@@ -236,28 +256,62 @@ struct Target {
          return true;
      }
  };
@@ -2874,6 +2897,7 @@ index 1241bfe..1cd5553 100644
 +    // Motion blur: previous frame camera (world -> clip) and eye/forward for cut detection.
 +    float prevViewProj[16]{},prevEye[3]{},prevForward[3]{};bool havePrev=false,motionActive=false;
 +    float motionPrev[16]{};
++    GLuint wetPuddle=0,wetRipple=0,wetRelief=0;bool wetUploaded=false;
      float projection[16]{},inverse[16]{},depthRange[2]{0,1},clearDepth=1,forwardSign=-1;
      void DestroyTargets() {
          // Scene FBO owns an attachment reference: delete it before the depth texture.
@@ -2890,10 +2914,13 @@ index 1241bfe..1cd5553 100644
 +        atmosphereProgram.Destroy();stateProgram.Destroy();compat.Destroy();
 +        if(lut) glDeleteTextures(1,&lut);
 +        lut=0;lutSize=0;lutLoaded[0]=0;lutTried=false;
++        GLuint wet[3]={wetPuddle,wetRipple,wetRelief};
++        for(GLuint t:wet) if(t) glDeleteTextures(1,&t);
++        wetPuddle=wetRipple=wetRelief=0;wetUploaded=false;
          if(vao) glDeleteVertexArrays(1,&vao);if(dirt) glDeleteTextures(1,&dirt);
          vao=dirt=0;ready=false;processedBeforeHud=false;
      }
-@@ -266,7 +313,7 @@ struct ContextState {
+@@ -266,7 +320,7 @@ struct ContextState {
          if(!vs) return false;
          const bool ok=Link(downsample,vs,Shaders::kDownsample) && Link(blur,vs,Shaders::kBlur)
              && Link(depthEffects,vs,Shaders::kDepthEffects) && Link(composite,vs,Shaders::kComposite)
@@ -2902,7 +2929,7 @@ index 1241bfe..1cd5553 100644
          glDeleteShader(vs);
          if(!ok) return false;
          glGenVertexArrays(1,&vao);
-@@ -292,10 +339,11 @@ struct ContextState {
+@@ -292,10 +346,11 @@ struct ContextState {
          glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
          ready=true;return vao!=0 && dirt!=0;
      }
@@ -2918,7 +2945,7 @@ index 1241bfe..1cd5553 100644
          if(!scene.Create(w,h,color)) return false;
          for(int i=0;i<3;++i) {
              int bw=std::max(1,w>>(i+1)),bh=std::max(1,h>>(i+1));
-@@ -303,6 +351,9 @@ struct ContextState {
+@@ -303,6 +358,9 @@ struct ContextState {
          }
          if(!effects.Create(std::max(1,w/2),std::max(1,h/2),working)) return false;
          if(!atmosphere.Create(std::max(1,w/4),std::max(1,h/4),working)) return false;
@@ -2928,7 +2955,7 @@ index 1241bfe..1cd5553 100644
          FX_LOG("FBO %dx%d, bloom=%s",w,h,caps.halfFloat ? "RGBA16F" : "RGBA8");
          return true;
      }
-@@ -356,7 +407,10 @@ void CleanupCurrent() {
+@@ -356,7 +414,10 @@ void CleanupCurrent() {
  void Retire(EGLDisplay d,EGLContext c) {
      WorldSunShadow::Retire(d,c);
      std::lock_guard<std::mutex> lock(statesMutex);
@@ -2940,7 +2967,7 @@ index 1241bfe..1cd5553 100644
  }
  bool ReadProjection(GLuint program,float* projection) {
      if(!program) return false;
-@@ -427,24 +481,85 @@ void BloomPasses(ContextState& s,const Settings& cfg,bool decode) {
+@@ -427,24 +488,160 @@ void BloomPasses(ContextState& s,const Settings& cfg,bool decode) {
          input=s.bloom[i].texture;iw=s.bloom[i].width;ih=s.bloom[i].height;
      }
  }
@@ -2998,6 +3025,81 @@ index 1241bfe..1cd5553 100644
 +    s.lutSize=h;
 +    FX_LOG("LUT loaded: %s (%d)",cfg.lutPath,h);
 +}
++// Wet-road textures from the player's graphics folder, decoded once on a
++// background thread (no hitch when the rain starts), uploaded per context.
++struct WetTextureData {
++    std::atomic<int> state{0}; // 0 not started, 1 loading, 2 ready, 3 unavailable
++    std::vector<unsigned char> puddle,ripple,relief;
++    int puddleSize=0,rippleSize=0,reliefSize=0;
++};
++WetTextureData wetData;
++std::vector<unsigned char> LoadChannels(const std::string& path,int wanted,int& w,int& h) {
++    int n=0;unsigned char* pixels=stbi_load(path.c_str(),&w,&h,&n,4);
++    std::vector<unsigned char> out;
++    if(!pixels) return out;
++    out.resize(size_t(w)*size_t(h)*size_t(wanted));
++    for(size_t i=0,count=size_t(w)*size_t(h);i<count;++i)
++        for(int c=0;c<wanted;++c) out[i*size_t(wanted)+size_t(c)]=pixels[i*4+size_t(c)];
++    stbi_image_free(pixels);
++    return out;
++}
++void StartWetTextures(const char* dir,bool lowMemory) {
++    int idle=0;
++    if(!dir[0] || !wetData.state.compare_exchange_strong(idle,1)) return;
++    std::string base=dir;
++    try {
++        std::thread([base,lowMemory] {
++            int pw=0,ph=0,rw=0,rh=0,aw=0,ah=0,lw=0,lh=0;
++            auto puddle=LoadChannels(base+"NoisePd.png",1,pw,ph);
++            auto ripple=LoadChannels(base+"Ripples.png",2,rw,rh);
++            auto alpha=LoadChannels(base+"RipplesAlpha.png",2,aw,ah);
++            auto relief=LoadChannels(base+"PuddlesRelief.png",2,lw,lh);
++            if(puddle.empty() || ripple.empty() || alpha.empty() || relief.empty() ||
++               pw!=ph || rw!=aw || rh!=ah || lw!=lh) {
++                FX_LOG("wet road textures not found in %s, procedural puddles",base.c_str());
++                wetData.state.store(3);return;
++            }
++            if(lowMemory && pw>=512) { // halve the 1024^2 mask: 256 KB instead of 1 MB
++                std::vector<unsigned char> half(size_t(pw/2)*size_t(ph/2));
++                for(int y=0;y<ph/2;++y) for(int x=0;x<pw/2;++x) {
++                    const size_t i=size_t(y*2)*size_t(pw)+size_t(x*2);
++                    half[size_t(y)*size_t(pw/2)+size_t(x)]=static_cast<unsigned char>(
++                        (puddle[i]+puddle[i+1]+puddle[i+size_t(pw)]+puddle[i+size_t(pw)+1]+2)/4);
++                }
++                puddle.swap(half);pw/=2;
++            }
++            std::vector<unsigned char> rippleRGBA(size_t(rw)*size_t(rh)*4);
++            for(size_t i=0,count=size_t(rw)*size_t(rh);i<count;++i) {
++                rippleRGBA[i*4]=ripple[i*2];rippleRGBA[i*4+1]=ripple[i*2+1];
++                rippleRGBA[i*4+2]=alpha[i*2];rippleRGBA[i*4+3]=alpha[i*2+1];
++            }
++            wetData.puddle.swap(puddle);wetData.puddleSize=pw;
++            wetData.ripple.swap(rippleRGBA);wetData.rippleSize=rw;
++            wetData.relief.swap(relief);wetData.reliefSize=lw;
++            wetData.state.store(2,std::memory_order_release);
++            FX_LOG("wet road textures loaded from %s",base.c_str());
++        }).detach();
++    } catch(...) { wetData.state.store(3); }
++}
++GLuint UploadWetTexture(const std::vector<unsigned char>& data,int size,GLenum internal,GLenum format) {
++    GLuint id=0;glGenTextures(1,&id);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,id);
++    glTexImage2D(GL_TEXTURE_2D,0,internal,size,size,0,format,GL_UNSIGNED_BYTE,data.data());
++    glGenerateMipmap(GL_TEXTURE_2D);
++    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_REPEAT);
++    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_REPEAT);
++    return id;
++}
++void EnsureWetTextures(ContextState& s,const Settings& cfg) {
++    if(s.wetUploaded || cfg.wetStrength<=0.0f) return;
++    StartWetTextures(cfg.textureDir,cfg.lowMemory);
++    if(wetData.state.load(std::memory_order_acquire)!=2) return;
++    s.wetPuddle=UploadWetTexture(wetData.puddle,wetData.puddleSize,GL_R8,GL_RED);
++    s.wetRipple=UploadWetTexture(wetData.ripple,wetData.rippleSize,GL_RGBA8,GL_RGBA);
++    s.wetRelief=UploadWetTexture(wetData.relief,wetData.reliefSize,GL_RG8,GL_RG);
++    s.wetUploaded=true;
++}
 +// 1x1 state: eye adaptation and the auto-focus distance, eased over time.
 +void StatePass(ContextState& s,const Settings& cfg,bool decode,GLuint depth) {
 +    const auto now=std::chrono::steady_clock::now();
@@ -3032,7 +3134,7 @@ index 1241bfe..1cd5553 100644
      const auto& cfg=look.config;
      glBindFramebuffer(GL_DRAW_FRAMEBUFFER,0);
      GLint oldDraw=GL_BACK;glGetIntegerv(GL_DRAW_BUFFER0,&oldDraw);
-@@ -452,8 +567,13 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
+@@ -452,8 +649,19 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
      glViewport(0,0,s.width,s.height);const Program& p=s.composite;glUseProgram(p.id);
      Texture(0,s.scene.texture);Texture(1,s.bloom[0].texture);Texture(2,s.bloom[1].texture);
      Texture(3,s.bloom[2].texture);Texture(4,s.effects.texture);
@@ -3044,10 +3146,16 @@ index 1241bfe..1cd5553 100644
 +    Texture(8,s.state[s.stateIndex].texture);Texture(9,dofActive ? s.dof.texture : s.scene.texture);
 +    Texture(10,lutActive ? s.lut : s.scene.texture);
 +    glUniform1i(p[State],8);glUniform1i(p[DofTex],9);glUniform1i(p[LUT],10);
++    Texture(11,s.wetUploaded ? s.wetPuddle : s.scene.texture);
++    Texture(12,s.wetUploaded ? s.wetRipple : s.scene.texture);
++    Texture(13,s.wetUploaded ? s.wetRelief : s.scene.texture);
++    glUniform1i(p[PuddleMask],11);glUniform1i(p[Ripple],12);glUniform1i(p[Relief],13);
++    // World metres per texture repeat: puddle mask 40 m, rain rings 1.5 m, wind waves 4 m.
++    glUniform4f(p[WetTex],s.wetUploaded ? 1.0f : 0.0f,1.0f/40.0f,1.0f/1.5f,1.0f/4.0f);
      glUniform1i(p[Scene],0);glUniform1i(p[Bloom0],1);glUniform1i(p[Bloom1],2);
      glUniform1i(p[Bloom2],3);glUniform1i(p[Effects],4);glUniform1i(p[Depth],5);glUniform1i(p[Dirt],6);
      glUniform1i(p[HasDepth],depth);glUniform1i(p[Decode],decode);glUniform1i(p[Encode],encode);
-@@ -464,6 +584,26 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
+@@ -464,6 +672,26 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
      glUniform2f(p[BloomDirt],cfg.bloomStrength,cfg.dirtStrength);
      glUniform2f(p[EffectSize],float(s.effects.width),float(s.effects.height));
      glUniform2fv(p[DepthRange],1,s.depthRange);glUniformMatrix4fv(p[InvProjection],1,GL_FALSE,s.inverse);
@@ -3074,7 +3182,7 @@ index 1241bfe..1cd5553 100644
      float positions[16]{},colors[16]{};
      for(int i=0;i<cfg.lightCount;++i) {
          const auto& l=cfg.lights[static_cast<size_t>(i)];
-@@ -478,6 +618,80 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
+@@ -478,6 +706,80 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
      const GLenum restore=static_cast<GLenum>(oldDraw);glDrawBuffers(1,&restore);
  }
  
@@ -3155,7 +3263,7 @@ index 1241bfe..1cd5553 100644
  bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* suppliedProjection) {
      if(!installed.load() || eglGetCurrentContext()==EGL_NO_CONTEXT ||
         eglGetCurrentDisplay()!=display || eglGetCurrentSurface(EGL_DRAW)!=surface) return false;
-@@ -486,19 +700,33 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -486,19 +788,33 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
      auto state=CurrentState(beforeHud);
      if(!state || state->retiring.load()) return false;
      ContextState& s=*state;
@@ -3197,7 +3305,7 @@ index 1241bfe..1cd5553 100644
      EGLint w=0,h=0;
      if(!eglQuerySurface(display,surface,EGL_WIDTH,&w) || !eglQuerySurface(display,surface,EGL_HEIGHT,&h) || w<2 || h<2) return false;
      if(!s.checked) {
-@@ -507,14 +735,16 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -507,14 +823,16 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
                 s.caps.es3 ? "GLES3 + optional depth" : "GLES2 color compatibility");
      }
      if(!s.caps.es2 || s.failed || (s.caps.es3 && UnsafeDrawState())) return false;
@@ -3219,7 +3327,7 @@ index 1241bfe..1cd5553 100644
              s.reportedFallback=true;
          }
          return false;
-@@ -526,7 +756,12 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -526,7 +844,12 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
          EGLint colorSpace=0;
          if(extensions && std::strstr(extensions,"EGL_KHR_gl_colorspace"))
              eglQuerySurface(display,surface,0x309D,&colorSpace);
@@ -3233,7 +3341,7 @@ index 1241bfe..1cd5553 100644
          if(rendered && beforeHud) s.processedBeforeHud=true;
          return rendered;
      }
-@@ -542,39 +777,90 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -542,39 +865,91 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
         (defaultDraw!=GL_BACK && defaultDraw!=GL_NONE)) return false;
      bool srgb=false;GLenum color=DefaultColor(srgb);if(!color) return false;
      GLint samples=0;glGetIntegerv(GL_SAMPLES,&samples);
@@ -3313,6 +3421,7 @@ index 1241bfe..1cd5553 100644
 +        s.havePrev=true;
 +    } else s.havePrev=false;
 +    EnsureLut(s,cfg);
++    EnsureWetTextures(s,cfg);
      BloomPasses(s,cfg,decode);
 -    if(hasDepth) DepthPass(s,cfg,decode);
 +    if(cfg.autoExposure>0 || cfg.dofStrength>0) StatePass(s,cfg,decode,depthTexture);
@@ -3337,7 +3446,7 @@ index 1241bfe..1cd5553 100644
          s.reportedDepth=true;
      }
      return true;
-@@ -584,34 +870,81 @@ bool TryRender(EGLDisplay d,EGLSurface s,bool early,const float* p=nullptr) noex
+@@ -584,34 +959,81 @@ bool TryRender(EGLDisplay d,EGLSurface s,bool early,const float* p=nullptr) noex
      catch(const std::exception& e) { FX_LOG("PostFX skipped: %s",e.what());return false; }
      catch(...) { FX_LOG("PostFX skipped: unknown error");return false; }
  }
@@ -3425,7 +3534,7 @@ index 1241bfe..1cd5553 100644
      if(!realMakeCurrent) return EGL_FALSE;
      if(!installed.load()) return realMakeCurrent(d,draw,read,c);
      if(eglGetCurrentContext()!=c || eglGetCurrentDisplay()!=d ||
-@@ -619,6 +952,7 @@ EGLBoolean EGLAPIENTRY HookMakeCurrent(EGLDisplay d,EGLSurface draw,EGLSurface r
+@@ -619,6 +1041,7 @@ EGLBoolean EGLAPIENTRY HookMakeCurrent(EGLDisplay d,EGLSurface draw,EGLSurface r
      return realMakeCurrent(d,draw,read,c);
  }
  EGLBoolean EGLAPIENTRY HookDestroyContext(EGLDisplay d,EGLContext c) {
@@ -3433,7 +3542,7 @@ index 1241bfe..1cd5553 100644
      if(!realDestroyContext) return EGL_FALSE;
      if(!installed.load()) return realDestroyContext(d,c);
      if(d==eglGetCurrentDisplay() && c==eglGetCurrentContext()) CleanupCurrent();
-@@ -626,47 +960,34 @@ EGLBoolean EGLAPIENTRY HookDestroyContext(EGLDisplay d,EGLContext c) {
+@@ -626,47 +1049,34 @@ EGLBoolean EGLAPIENTRY HookDestroyContext(EGLDisplay d,EGLContext c) {
      return realDestroyContext(d,c);
  }
  EGLBoolean EGLAPIENTRY HookDestroySurface(EGLDisplay d,EGLSurface s) {
@@ -3496,7 +3605,7 @@ index 1241bfe..1cd5553 100644
      return true;
  }
  void* ResolveEgl(void* handle,const char* name) {
-@@ -678,11 +999,23 @@ template<class Function> bool Hook(void* symbol,const char* name,Function replac
+@@ -678,11 +1088,23 @@ template<class Function> bool Hook(void* symbol,const char* name,Function replac
      if(!symbol || !backendHook) return false;
      void* hook=backendHook(symbol,reinterpret_cast<void*>(replacement),reinterpret_cast<void**>(&original));
      if(!hook || !original) {
@@ -3521,7 +3630,7 @@ index 1241bfe..1cd5553 100644
  } // namespace
  
  bool InstallHooks() {
-@@ -722,14 +1055,14 @@ bool InstallHooks() {
+@@ -722,14 +1144,14 @@ bool InstallHooks() {
          if(symbols[6] && !Hook(symbols[6],names[6],&HookDamageKHR,realDamageKHR)) return;
          if(symbols[7]==symbols[6] && realDamageKHR) realDamageEXT=realDamageKHR;
          else if(symbols[7] && !Hook(symbols[7],names[7],&HookDamageEXT,realDamageEXT)) return;
@@ -3540,7 +3649,7 @@ index 1241bfe..1cd5553 100644
      });
      return installed.load();
  }
-@@ -748,14 +1081,33 @@ void SetSettings(const Settings& input) {
+@@ -748,14 +1170,34 @@ void SetSettings(const Settings& input) {
      c.shadowLift=Clamp(c.shadowLift,0,0.03f,0.008f);c.vignette=Clamp(c.vignette,0,0.25f,0.04f);
      c.sunShafts=Clamp(c.sunShafts,0,0.5f,0.24f);c.lensFlare=Clamp(c.lensFlare,0,0.2f,0.045f);
      c.fogStrength=Clamp(c.fogStrength,0,1,0.65f);
@@ -3555,6 +3664,7 @@ index 1241bfe..1cd5553 100644
 +    c.rayLength=Clamp(c.rayLength,0.2f,1,0.88f);c.rayDecay=Clamp(c.rayDecay,0.8f,0.999f,0.965f);
 +    c.grain=Clamp(c.grain,0,1,0);c.dither=Clamp(c.dither,0,4,1);c.gradeStrength=Clamp(c.gradeStrength,0,1,1);
 +    c.lutStrength=Clamp(c.lutStrength,0,1,1);c.lutPath[sizeof(c.lutPath)-1]=0;
++    c.textureDir[sizeof(c.textureDir)-1]=0;
 +    c.wetReflection=Clamp(c.wetReflection,0,3,1);c.wetPuddles=Clamp(c.wetPuddles,0,2,1);
 +    c.wetRipples=Clamp(c.wetRipples,0,2,1);c.wetForce=Clamp(c.wetForce,0,1,0);
 +    c.nightThreshold=Clamp(c.nightThreshold,0.1f,1,0.52f);c.nightGlow=Clamp(c.nightGlow,0,4,1);
@@ -3576,7 +3686,7 @@ index 1241bfe..1cd5553 100644
  void RenderBeforeHud(const float* projection) {
      if(insideSwap || !installed.load()) return;
      TryRender(eglGetCurrentDisplay(),eglGetCurrentSurface(EGL_DRAW),true,projection);
-@@ -768,4 +1120,17 @@ void BindCurrentGameSurface() {
+@@ -768,4 +1210,17 @@ void BindCurrentGameSurface() {
          if(s) s->gameSurface=eglGetCurrentSurface(EGL_DRAW);
      } catch(...) { FX_LOG("Unable to register game EGL surface"); }
  }
@@ -3595,7 +3705,7 @@ index 1241bfe..1cd5553 100644
 +}
  } // namespace EglPostFX
 diff --git a/graphics/postfx/EglPostFX.h b/graphics/postfx/EglPostFX.h
-index 333a313..2323f3d 100644
+index 333a313..a88a431 100644
 --- a/graphics/postfx/EglPostFX.h
 +++ b/graphics/postfx/EglPostFX.h
 @@ -1,12 +1,13 @@
@@ -3642,7 +3752,7 @@ index 333a313..2323f3d 100644
      float bloomKnee = 0.20f;
      float dirtStrength = 0.08f;
      float ssrStrength = 0.32f; // Wet-weather maximum; dry reflection is reduced.
-@@ -42,20 +49,40 @@ struct Settings {
+@@ -42,20 +49,43 @@ struct Settings {
      float ssrThickness = 0.30f;
      float aoStrength = 0.65f;
      float aoRadius = 1.0f;
@@ -3676,6 +3786,9 @@ index 333a313..2323f3d 100644
 +    float nightThreshold = 0.52f; // Ambang bloom malam relatif ke siang.
 +    float nightGlow = 1.0f;       // Pengali bloom malam.
 +    bool lowMemory = false;       // HP RAM kecil: target 8-bit, tanpa buffer tambahan.
++    // Folder tekstur jalan basah (NoisePd/Ripples/RipplesAlpha/PuddlesRelief.png).
++    // Kosong atau file tidak ada = genangan/riak prosedural seperti sebelumnya.
++    char textureDir[192] = {};
      int lightCount = 0; // No fixed glowing spot pasted over the game by default.
      std::array<ScreenLight, 4> lights{};
  };
@@ -3688,7 +3801,7 @@ index 333a313..2323f3d 100644
  bool InstallHooks();
  
  // Thread-safe. Tidak melakukan GL call; nilai diambil pada render thread.
-@@ -70,9 +97,13 @@ void BindCurrentGameSurface();
+@@ -70,9 +100,13 @@ void BindCurrentGameSurface();
  
  // Integrasi opsional pada batas scene -> HUD yang SUDAH ada di client.
  // Seluruh GL call tetap berjalan pada thread pemilik current EGLContext.
@@ -3908,7 +4021,7 @@ index 9c72611..35c5d69 100644
  }
  } // namespace EglPostFX
 diff --git a/graphics/postfx/ShaderSources.h b/graphics/postfx/ShaderSources.h
-index f5ee334..9548e5c 100644
+index f5ee334..756a537 100644
 --- a/graphics/postfx/ShaderSources.h
 +++ b/graphics/postfx/ShaderSources.h
 @@ -1,8 +1,8 @@
@@ -3953,7 +4066,7 @@ index f5ee334..9548e5c 100644
  }
  )GLSL";
  inline constexpr char kBlur[] = R"GLSL(#version 300 es
-@@ -206,6 +212,26 @@ uniform vec4 uDetail,uFog;
+@@ -206,6 +212,30 @@ uniform vec4 uDetail,uFog;
  uniform vec3 uShadowTint,uHighlightTint;
  uniform vec2 uTexel;
  uniform float uClearDepth;
@@ -3977,13 +4090,18 @@ index f5ee334..9548e5c 100644
 +uniform mat4 uPrevViewProj; // world -> previous frame clip
 +uniform vec4 uLut;          // strength, size, 0, enabled
 +uniform vec4 uFinish;       // film grain, dither, grading strength, 0
++uniform sampler2D uPuddleMask; // TESTLIT/graphics/textures/NoisePd.png (r)
++uniform sampler2D uRipple;     // Ripples.png normal xy + RipplesAlpha ring, phase
++uniform sampler2D uRelief;     // PuddlesRelief.png normal xy (wind on puddles)
++uniform vec4 uWetTex;          // textures loaded, puddle scale, ripple scale, relief scale
  vec3 linearRGB(vec3 c) {
      return mix(c/12.92,pow(max((c+0.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(0.04045),c));
  }
-@@ -240,6 +266,42 @@ float viewDepth(vec2 uv) {
+@@ -240,12 +270,48 @@ float viewDepth(vec2 uv) {
      vec4 p=uInvProjection*vec4(uv*2.0-1.0,z,1);
      return abs(p.z/max(abs(p.w),1e-7));
  }
+-vec4 effects() {
 +vec3 viewPosition(vec2 uv) {
 +    float z=(texture(uDepth,uv).r-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
 +    vec4 p=uInvProjection*vec4(uv*2.0-1.0,z,1.0);
@@ -4020,10 +4138,19 @@ index f5ee334..9548e5c 100644
 +    float d=length(f-o*0.6)-phase*0.5;
 +    return exp(-d*d*576.0)*(1.0-phase);
 +}
- vec4 effects() {
++vec4 effects(vec2 at) {
      if(uHasDepth==0) return vec4(0,0,0,1);
      // Depth-aware 4-tap upsample untuk mengurangi halo half-resolution.
-@@ -258,17 +320,119 @@ vec4 effects() {
+-    float center=viewDepth(vUV);
+-    vec2 base=floor(vUV*uEffectSize-0.5);
+-    vec2 fraction=fract(vUV*uEffectSize-0.5);
++    float center=viewDepth(at);
++    vec2 base=floor(at*uEffectSize-0.5);
++    vec2 fraction=fract(at*uEffectSize-0.5);
+     vec4 sum=vec4(0);float total=0.0;
+     for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
+         vec2 uv=(base+vec2(x,y)+0.5)/uEffectSize;
+@@ -258,17 +324,146 @@ vec4 effects() {
  vec3 scene(vec2 uv) {
      vec3 c=texture(uScene,uv).rgb;return uDecodeSRGB!=0 ? linearRGB(c) : c;
  }
@@ -4045,15 +4172,28 @@ index f5ee334..9548e5c 100644
 +    float lb=luma(b);
 +    return (lb<lmin||lb>lmax) ? a : b;
 +}
-+// Wet asphalt and puddles on flat ground. Returns the reflection multiplier.
-+float wetSurface(inout vec3 c) {
++// Rain drop rings from the ripple texture (Lagarde): b = ring profile,
++// a = time offset per drop, rg = ring normal. Returns normal xy and ring strength.
++vec3 textureRipple(vec2 p,float t) {
++    vec4 r=texture(uRipple,p);
++    float drop=fract(r.a+t);
++    float ring=drop-1.0+r.b;
++    float factor=clamp(0.2+uWet.y*0.8-drop,0.0,1.0)*r.b*sin(clamp(ring*9.0,0.0,3.0)*3.14159265);
++    return vec3((r.rg*2.0-1.0)*factor*0.35,abs(factor));
++}
++// Wet asphalt and puddles on flat ground. Returns the reflection multiplier;
++// distort = screen offset for the reflection (ripples, wind on puddles).
++float wetSurface(inout vec3 c,out vec2 distort) {
++    distort=vec2(0.0);
 +    vec3 p=viewPosition(vUV);
 +    float distance=length(p);
 +    vec3 n=mat3(uInvView)*viewNormal(vUV,p);
 +    float flatness=smoothstep(0.80,0.95,n.z)*(1.0-smoothstep(60.0,140.0,distance));
 +    if(flatness<=0.0) return 1.0;
 +    vec3 world=(uInvView*vec4(p,1.0)).xyz;
-+    float noise=valueNoise(world.xy*0.18)*0.65+valueNoise(world.xy*0.55+17.3)*0.35;
++    bool textured=uWetTex.x>0.5;
++    float noise=textured ? texture(uPuddleMask,world.xy*uWetTex.y).r*0.8+valueNoise(world.xy*0.55+17.3)*0.2
++                         : valueNoise(world.xy*0.18)*0.65+valueNoise(world.xy*0.55+17.3)*0.35;
 +    float puddle=smoothstep(1.0-uWet.z,1.0-uWet.z+0.12,noise)*uWet.x*flatness;
 +    float damp=uWet.x*flatness;
 +    c*=mix(1.0,0.72,damp);   // wet asphalt is darker
@@ -4061,7 +4201,19 @@ index f5ee334..9548e5c 100644
 +    vec3 toEye=normalize(mat3(uInvView)*(-p));
 +    float fresnel=0.02+0.98*pow(1.0-clamp(toEye.z,0.0,1.0),5.0);
 +    vec3 skyColour=mix(uSkyHorizon.rgb,uSkyZenith.rgb,0.3);
-+    float rings=uWet.y>0.01 ? ripple(world.xy,uTime)+ripple(world.xy+vec2(0.37,0.71),uTime*1.13) : 0.0;
++    float rings=0.0;
++    if(textured) {
++        vec2 wave=(texture(uRelief,world.xy*uWetTex.w+uTime*vec2(0.021,0.013)).rg*2.0-1.0)*0.25;
++        vec2 n=wave;
++        if(uWet.y>0.01) {
++            vec3 a=textureRipple(world.xy*uWetTex.z,uTime*0.9);
++            vec3 b=textureRipple(world.xy*uWetTex.z+vec2(0.37,0.71),uTime*0.9+0.5);
++            n+=a.xy+b.xy;rings=(a.z+b.z)*0.6;
++        }
++        distort=n*0.018*puddle;
++    } else if(uWet.y>0.01) {
++        rings=ripple(world.xy,uTime)+ripple(world.xy+vec2(0.37,0.71),uTime*1.13);
++    }
 +    c+=skyColour*(fresnel*puddle*0.6+rings*puddle*uWet.y*0.25);
 +    return 1.0+uWet.w*puddle+0.5*damp;
 +}
@@ -4122,7 +4274,7 @@ index f5ee334..9548e5c 100644
      vec3 local=(scene(vUV+vec2(uTexel.x,0))+scene(vUV-vec2(uTexel.x,0))
          +scene(vUV+vec2(0,uTexel.y))+scene(vUV-vec2(0,uTexel.y)))*0.25;
      c=max(c+clamp((luma(c)-luma(local))*uDetail.x,-0.035,0.035),vec3(0));
-     vec4 fx=effects();
+-    vec4 fx=effects();
 -    c=c*fx.a+fx.rgb;
 -    if(uHasDepth!=0 && abs(texture(uDepth,vUV).r-uClearDepth)>0.0000002) {
 -        float distance=max(viewDepth(vUV)-8.0,0.0);
@@ -4136,7 +4288,10 @@ index f5ee334..9548e5c 100644
 +        float coc=uDof.x*smoothstep(start,start+max(focus*2.0,25.0),depthMetres);
 +        c=mix(c,texture(uDofTex,vUV).rgb,coc);
 +    }
-+    float reflection=geometry && uWet.x>0.01 ? wetSurface(c) : 1.0;
++    vec2 distort=vec2(0.0);
++    float reflection=geometry && uWet.x>0.01 ? wetSurface(c,distort) : 1.0;
++    vec4 fx=effects(vUV);
++    if(dot(distort,distort)>0.0) fx.rgb=effects(clamp(vUV+distort,vec2(0.001),vec2(0.999))).rgb;
 +    c=c*fx.a+fx.rgb*reflection;
 +    if(geometry) {
 +        float distance=max(depthMetres-8.0,0.0);
@@ -4147,7 +4302,7 @@ index f5ee334..9548e5c 100644
      }
      vec3 bloom=texture(uBloom0,vUV).rgb*0.50+texture(uBloom1,vUV).rgb*0.30+texture(uBloom2,vUV).rgb*0.20;
      c+=bloom*uBloomDirt.x*(1.0+texture(uDirt,vUV).r*uBloomDirt.y);
-@@ -281,15 +445,25 @@ void main() {
+@@ -281,15 +476,25 @@ void main() {
          float pulse=1.0+uLightColor[i].a*sin(uTime*0.6+float(i)*1.7);
          c+=uLightColor[i].rgb*(uLightPosition[i].w*glow*pulse);
      }
@@ -4175,7 +4330,7 @@ index f5ee334..9548e5c 100644
  vec3 linearRGB(vec3 c) {
      return mix(c/12.92,pow(max((c+0.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(0.04045),c));
  }
-@@ -322,37 +496,149 @@ vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlight
+@@ -322,37 +527,149 @@ vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlight
  uniform sampler2D uScene;
  uniform vec2 uTexel;
  uniform vec4 uSun; // sun UV, shaft strength, flare strength.
@@ -4334,7 +4489,7 @@ index f5ee334..9548e5c 100644
  inline constexpr char kCompatVertex[] = R"GLSL(#version 100
  attribute vec2 aPosition;
  varying highp vec2 vUV;
-@@ -501,33 +787,57 @@ vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlight
+@@ -501,33 +818,57 @@ vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlight
  uniform sampler2D uScene;
  uniform vec2 uTexel;
  uniform vec4 uSun; // sun UV, shaft strength, flare strength.
@@ -4473,10 +4628,10 @@ index 3ae46d3..67eb2dc 100644
  #include "light_shafts.glsl"
  void main() { outColor=vec4(sunEffects(vUV),1); }
 diff --git a/graphics/postfx/shaders/composite.frag b/graphics/postfx/shaders/composite.frag
-index ec47e77..78b095d 100644
+index ec47e77..6ed43af 100644
 --- a/graphics/postfx/shaders/composite.frag
 +++ b/graphics/postfx/shaders/composite.frag
-@@ -28,12 +28,68 @@ uniform vec4 uDetail,uFog;
+@@ -28,18 +28,78 @@ uniform vec4 uDetail,uFog;
  uniform vec3 uShadowTint,uHighlightTint;
  uniform vec2 uTexel;
  uniform float uClearDepth;
@@ -4500,12 +4655,17 @@ index ec47e77..78b095d 100644
 +uniform mat4 uPrevViewProj; // world -> previous frame clip
 +uniform vec4 uLut;          // strength, size, 0, enabled
 +uniform vec4 uFinish;       // film grain, dither, grading strength, 0
++uniform sampler2D uPuddleMask; // TESTLIT/graphics/textures/NoisePd.png (r)
++uniform sampler2D uRipple;     // Ripples.png normal xy + RipplesAlpha ring, phase
++uniform sampler2D uRelief;     // PuddlesRelief.png normal xy (wind on puddles)
++uniform vec4 uWetTex;          // textures loaded, puddle scale, ripple scale, relief scale
  #include "reference_color.glsl"
  float viewDepth(vec2 uv) {
      float z=(texture(uDepth,uv).r-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
      vec4 p=uInvProjection*vec4(uv*2.0-1.0,z,1);
      return abs(p.z/max(abs(p.w),1e-7));
  }
+-vec4 effects() {
 +vec3 viewPosition(vec2 uv) {
 +    float z=(texture(uDepth,uv).r-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
 +    vec4 p=uInvProjection*vec4(uv*2.0-1.0,z,1.0);
@@ -4542,10 +4702,19 @@ index ec47e77..78b095d 100644
 +    float d=length(f-o*0.6)-phase*0.5;
 +    return exp(-d*d*576.0)*(1.0-phase);
 +}
- vec4 effects() {
++vec4 effects(vec2 at) {
      if(uHasDepth==0) return vec4(0,0,0,1);
      // Depth-aware 4-tap upsample untuk mengurangi halo half-resolution.
-@@ -52,17 +108,119 @@ vec4 effects() {
+-    float center=viewDepth(vUV);
+-    vec2 base=floor(vUV*uEffectSize-0.5);
+-    vec2 fraction=fract(vUV*uEffectSize-0.5);
++    float center=viewDepth(at);
++    vec2 base=floor(at*uEffectSize-0.5);
++    vec2 fraction=fract(at*uEffectSize-0.5);
+     vec4 sum=vec4(0);float total=0.0;
+     for(int y=0;y<2;++y) for(int x=0;x<2;++x) {
+         vec2 uv=(base+vec2(x,y)+0.5)/uEffectSize;
+@@ -52,17 +112,146 @@ vec4 effects() {
  vec3 scene(vec2 uv) {
      vec3 c=texture(uScene,uv).rgb;return uDecodeSRGB!=0 ? linearRGB(c) : c;
  }
@@ -4567,15 +4736,28 @@ index ec47e77..78b095d 100644
 +    float lb=luma(b);
 +    return (lb<lmin||lb>lmax) ? a : b;
 +}
-+// Wet asphalt and puddles on flat ground. Returns the reflection multiplier.
-+float wetSurface(inout vec3 c) {
++// Rain drop rings from the ripple texture (Lagarde): b = ring profile,
++// a = time offset per drop, rg = ring normal. Returns normal xy and ring strength.
++vec3 textureRipple(vec2 p,float t) {
++    vec4 r=texture(uRipple,p);
++    float drop=fract(r.a+t);
++    float ring=drop-1.0+r.b;
++    float factor=clamp(0.2+uWet.y*0.8-drop,0.0,1.0)*r.b*sin(clamp(ring*9.0,0.0,3.0)*3.14159265);
++    return vec3((r.rg*2.0-1.0)*factor*0.35,abs(factor));
++}
++// Wet asphalt and puddles on flat ground. Returns the reflection multiplier;
++// distort = screen offset for the reflection (ripples, wind on puddles).
++float wetSurface(inout vec3 c,out vec2 distort) {
++    distort=vec2(0.0);
 +    vec3 p=viewPosition(vUV);
 +    float distance=length(p);
 +    vec3 n=mat3(uInvView)*viewNormal(vUV,p);
 +    float flatness=smoothstep(0.80,0.95,n.z)*(1.0-smoothstep(60.0,140.0,distance));
 +    if(flatness<=0.0) return 1.0;
 +    vec3 world=(uInvView*vec4(p,1.0)).xyz;
-+    float noise=valueNoise(world.xy*0.18)*0.65+valueNoise(world.xy*0.55+17.3)*0.35;
++    bool textured=uWetTex.x>0.5;
++    float noise=textured ? texture(uPuddleMask,world.xy*uWetTex.y).r*0.8+valueNoise(world.xy*0.55+17.3)*0.2
++                         : valueNoise(world.xy*0.18)*0.65+valueNoise(world.xy*0.55+17.3)*0.35;
 +    float puddle=smoothstep(1.0-uWet.z,1.0-uWet.z+0.12,noise)*uWet.x*flatness;
 +    float damp=uWet.x*flatness;
 +    c*=mix(1.0,0.72,damp);   // wet asphalt is darker
@@ -4583,7 +4765,19 @@ index ec47e77..78b095d 100644
 +    vec3 toEye=normalize(mat3(uInvView)*(-p));
 +    float fresnel=0.02+0.98*pow(1.0-clamp(toEye.z,0.0,1.0),5.0);
 +    vec3 skyColour=mix(uSkyHorizon.rgb,uSkyZenith.rgb,0.3);
-+    float rings=uWet.y>0.01 ? ripple(world.xy,uTime)+ripple(world.xy+vec2(0.37,0.71),uTime*1.13) : 0.0;
++    float rings=0.0;
++    if(textured) {
++        vec2 wave=(texture(uRelief,world.xy*uWetTex.w+uTime*vec2(0.021,0.013)).rg*2.0-1.0)*0.25;
++        vec2 n=wave;
++        if(uWet.y>0.01) {
++            vec3 a=textureRipple(world.xy*uWetTex.z,uTime*0.9);
++            vec3 b=textureRipple(world.xy*uWetTex.z+vec2(0.37,0.71),uTime*0.9+0.5);
++            n+=a.xy+b.xy;rings=(a.z+b.z)*0.6;
++        }
++        distort=n*0.018*puddle;
++    } else if(uWet.y>0.01) {
++        rings=ripple(world.xy,uTime)+ripple(world.xy+vec2(0.37,0.71),uTime*1.13);
++    }
 +    c+=skyColour*(fresnel*puddle*0.6+rings*puddle*uWet.y*0.25);
 +    return 1.0+uWet.w*puddle+0.5*damp;
 +}
@@ -4644,7 +4838,7 @@ index ec47e77..78b095d 100644
      vec3 local=(scene(vUV+vec2(uTexel.x,0))+scene(vUV-vec2(uTexel.x,0))
          +scene(vUV+vec2(0,uTexel.y))+scene(vUV-vec2(0,uTexel.y)))*0.25;
      c=max(c+clamp((luma(c)-luma(local))*uDetail.x,-0.035,0.035),vec3(0));
-     vec4 fx=effects();
+-    vec4 fx=effects();
 -    c=c*fx.a+fx.rgb;
 -    if(uHasDepth!=0 && abs(texture(uDepth,vUV).r-uClearDepth)>0.0000002) {
 -        float distance=max(viewDepth(vUV)-8.0,0.0);
@@ -4658,7 +4852,10 @@ index ec47e77..78b095d 100644
 +        float coc=uDof.x*smoothstep(start,start+max(focus*2.0,25.0),depthMetres);
 +        c=mix(c,texture(uDofTex,vUV).rgb,coc);
 +    }
-+    float reflection=geometry && uWet.x>0.01 ? wetSurface(c) : 1.0;
++    vec2 distort=vec2(0.0);
++    float reflection=geometry && uWet.x>0.01 ? wetSurface(c,distort) : 1.0;
++    vec4 fx=effects(vUV);
++    if(dot(distort,distort)>0.0) fx.rgb=effects(clamp(vUV+distort,vec2(0.001),vec2(0.999))).rgb;
 +    c=c*fx.a+fx.rgb*reflection;
 +    if(geometry) {
 +        float distance=max(depthMetres-8.0,0.0);
@@ -4669,7 +4866,7 @@ index ec47e77..78b095d 100644
      }
      vec3 bloom=texture(uBloom0,vUV).rgb*0.50+texture(uBloom1,vUV).rgb*0.30+texture(uBloom2,vUV).rgb*0.20;
      c+=bloom*uBloomDirt.x*(1.0+texture(uDirt,vUV).r*uBloomDirt.y);
-@@ -75,6 +233,14 @@ void main() {
+@@ -75,6 +264,14 @@ void main() {
          float pulse=1.0+uLightColor[i].a*sin(uTime*0.6+float(i)*1.7);
          c+=uLightColor[i].rgb*(uLightPosition[i].w*glow*pulse);
      }
