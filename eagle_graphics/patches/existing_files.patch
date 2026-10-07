@@ -1,0 +1,184 @@
+--- a/jni/main.cpp
++++ b/jni/main.cpp
+@@ -15,7 +15,7 @@
+ #include "java_systems/HUD.h"
+ #include "CLoader.h"
+ #include "game/ModelIdLimit.h"
+-#include "graphics/postfx/EglPostFX.h"
++#include "graphics/GraphicsEngine.h" // EAGLE graphics engine (ShadowHook, no AML)
+ #include "loader/AmlBootstrap.h"
+ #include "crashlytics.h"
+  
+@@ -578,10 +578,12 @@
+ 
+ 	InstallCrashHandlers();
+ 
+-	// Pasang hook API EGL dari JNI_OnLoad; FBO/shader baru dibuat pada render thread.
+-	// Tidak mengubah base address atau offset RenderWare yang sudah ada.
+-	if (amlReady) EglPostFX::InstallHooks();
+-	else Log("AML4 not ready; graphics hooks deferred (see EagleAML log)");
++	if (!amlReady) Log("AML4 not ready (see EagleAML log)");
++
++	// EAGLE graphics engine: config/log + ShadowHook hooks. Must run before GTA
++	// compiles its shaders (receiver injection). All GL work happens later on
++	// the RenderQueue thread; nothing here depends on AML.
++	gfx::GraphicsEngine::Get().EarlyInit();
+ 
+ 	return JNI_VERSION_1_6;
+ }
+@@ -656,7 +658,7 @@
+ Java_com_holy_game_core_Samp_initSAMP(JNIEnv *env, jobject thiz, jfloat maxFps, jstring directory) {
+     // Retry only when JNI_OnLoad ran before Application existed. The bootstrap
+     // itself never invokes an already-entered AML JNI entry a second time.
+-    if (AmlBootstrap::Initialize(javaVM, nullptr)) EglPostFX::InstallHooks();
++    AmlBootstrap::Initialize(javaVM, nullptr);
+     Log("Initializing SAMP..");
+ 
+     const char *dirChars = env->GetStringUTFChars(directory, nullptr);
+--- a/jni/CMakeLists.txt
++++ b/jni/CMakeLists.txt
+@@ -45,6 +45,34 @@
+ list(FILTER SOURCES EXCLUDE REGEX "/AML/")
+ list(FILTER SOURCES EXCLUDE REGEX "/modloader/tests/")
+ 
++# EAGLE graphics engine (jni/graphics). Already matched by the recursive glob
++# above; listed explicitly so the module is visible and never silently dropped.
++set(EAGLE_GRAPHICS_SOURCES
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GraphicsEngine.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GraphicsConfig.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GraphicsLog.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GraphicsHooks.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GraphicsJNI.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GameRenderBridge.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/RenderQueueBridge.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GLCaps.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GLStateBackup.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/ShaderManager.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/GlShader.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/ShaderUniforms.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/ShaderPatcher.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/FrameBuffer.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/SunManager.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/TimeCycleFX.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/CascadeShadow.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/ShadowCasters.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/ShadowManager.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/DebugOverlay.cpp
++        ${CMAKE_CURRENT_LIST_DIR}/graphics/Math/Matrix4.cpp
++)
++list(APPEND SOURCES ${EAGLE_GRAPHICS_SOURCES})
++list(REMOVE_DUPLICATES SOURCES)
++
+ add_library(multiplayer SHARED ${SOURCES})
+ 
+ # EGL postFX uses the existing arm64 GlossHook archive, no new GTA offsets.
+--- a/jni/Android.mk
++++ b/jni/Android.mk
+@@ -115,6 +115,8 @@
+ 
+ # --- Source Files ---
+ # Sistem auto-detect mendeteksi semua file .cpp, .c, .cc.
++# Termasuk EAGLE graphics engine di graphics/ (GraphicsEngine.cpp, ShadowManager.cpp,
++# graphics/Math/Matrix4.cpp, ...). Engine hanya butuh GLESv3 + EGL + shadowhook (sudah ada).
+ # Pengecualian folder /opus/ tetap dipertahankan untuk optimasi kompilasi.
+ MY_SRC_FILES := $(shell find $(LOCAL_PATH) -type f \( -name "*.cpp" -o -name "*.c" -o -name "*.cc" \) | grep -v "/opus/" | grep -v "/AML/" | grep -v "/modloader/tests/")
+ LOCAL_SRC_FILES := $(MY_SRC_FILES:$(LOCAL_PATH)/%=%)
+--- a/jni/app/app_game.cpp
++++ b/jni/app/app_game.cpp
+@@ -32,34 +32,7 @@
+ #include "game/Scene.h"
+ #include "game/Shadow/Shadows.h"
+ #include "net/netgame.h"   // CObjectPool::ProcessMaterialText()
+-#include "graphics/sun/WorldSunShadow.h"
+-#include "game/TimeCycle.h"
+-#include "game/Clock.h"
+-#include <algorithm>
+-#include <cmath>
+-
+-static WorldSunShadow::Frame GetSunShadowFrame()
+-{
+-    WorldSunShadow::Frame frame;
+-    if(CMirrors::bRenderingReflection || CMirrors::TypeOfMirror || !Scene.m_pRwCamera ||
+-       CTimeCycle::m_CurrentStoredValue >= 16) return frame;
+-    // All fields already belong to the client's existing clock/weather/camera
+-    // integration. No new address lookup or modification of the game clock.
+-    const auto sun=CTimeCycle::GetVectorToSun();
+-    const auto position=CCamera::Get().GetPosition();
+-    const auto front=CCamera::GetActiveCamera().Front;
+-    const float hour=float(CClock::GetGameClockHours())+float(CClock::GetGameClockMinutes())/60.0f;
+-    auto unit=[](float value) {return std::isfinite(value) ? std::clamp(value,0.0f,1.0f):0.0f;};
+-    const float daylight=unit((hour-5.0f)/1.25f)*unit((20.0f-hour)/1.5f)*unit((sun.z-0.01f)/0.18f);
+-    frame.sunlight=daylight*(1-unit(CWeather::Rain))*(1-0.8f*unit(CWeather::CloudCoverage))
+-        *(1-unit(CWeather::UnderWaterness))*(1-unit(CWeather::InTunnelness));
+-    frame.focus[0]=position.x+front.x*22.0f;
+-    frame.focus[1]=position.y+front.y*22.0f;
+-    frame.focus[2]=position.z+front.z*22.0f;
+-    frame.toSun[0]=sun.x;frame.toSun[1]=sun.y;frame.toSun[2]=sun.z;
+-    frame.valid=frame.sunlight>0.0f;
+-    return frame;
+-}
++#include "graphics/GraphicsEngine.h"
+ 
+ void RenderScene()
+ {
+@@ -174,35 +147,16 @@
+     CCEF3D::ApplyPendingTexture();
+ }
+ 
+-#include "graphics/postfx/EglPostFX.h"
+-
+ void Render2dStuff()
+ {
+-    // This boundary is hooked in the Alyn flow; its native RenderScene remains
+-    // untouched. Composite before an alternate target is flushed and before HUD.
+-    WorldSunShadow::EndWorld();
+-    WorldSunShadow::QueueFrame(GetSunShadowFrame());
++    // 3D -> HUD boundary (this client redirects the native Render2dStuff).
++    // EAGLE graphics: shadow receivers are switched off here (queued on the
++    // RenderQueue thread) so the HUD, SA-MP UI, CEF and text are never
++    // shadowed; the post-process composite (phase 6) is queued at this point too.
++    gfx::GraphicsEngine::Get().OnEndWorld();
+     if( CHook::CallFunction<bool>(g_libGTASA + (VER_x32 ? 0x001BB7F4 + 1 : 0x24EA90)) ) // emu_IsAltRenderTarget()
+         CHook::CallFunction<void>(g_libGTASA + (VER_x32 ? 0x001BC20C + 1 : 0x24F5B8)); // emu_FlushAltRenderTarget()
+ 
+-
+-    // Batas 3D -> HUD yang sudah ada; tidak menambah hook/offset RenderWare.
+-    // Capture di sini sebelum depth bisa dibuang/ditimpa oleh jalur 2D.
+-    // Read existing client values only; never patch weather/time/corona offsets.
+-    EglPostFX::FrameEnvironment fxEnvironment;
+-    fxEnvironment.valid=true;
+-    fxEnvironment.hour=float(CClock::GetGameClockHours())+float(CClock::GetGameClockMinutes())/60.0f;
+-    fxEnvironment.rain=CWeather::Rain;fxEnvironment.wetness=CWeather::WetRoads;
+-    fxEnvironment.cloud=CWeather::CloudCoverage;fxEnvironment.fog=CWeather::Foggyness;
+-    fxEnvironment.underwater=CWeather::UnderWaterness;fxEnvironment.tunnel=CWeather::InTunnelness;
+-    if(RsGlobal && RsGlobal->maximumWidth>0 && RsGlobal->maximumHeight>0) {
+-        fxEnvironment.sunUV[0]=CCoronas::SunScreenX/float(RsGlobal->maximumWidth);
+-        fxEnvironment.sunUV[1]=1.0f-CCoronas::SunScreenY/float(RsGlobal->maximumHeight);
+-        fxEnvironment.sunVisible=!CCoronas::SunBlockedByClouds && CWeather::SunGlare>0.0f;
+-    }
+-    EglPostFX::SetFrameEnvironment(fxEnvironment);
+-    EglPostFX::RenderBeforeHud();
+-
+     RwRenderStateSet(rwRENDERSTATEZTESTENABLE, RWRSTATE(FALSE));
+     RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, RWRSTATE(FALSE));
+     RwRenderStateSet(rwRENDERSTATEVERTEXALPHAENABLE, RWRSTATE(TRUE));
+--- a/jni/game/Shadow/RealTimeShadowManager.cpp
++++ b/jni/game/Shadow/RealTimeShadowManager.cpp
+@@ -4,6 +4,7 @@
+ 
+ #include "RealTimeShadowManager.h"
+ #include "util/patch.h"
++#include "graphics/GraphicsEngine.h"
+  
+ void CRealTimeShadowManager::ReturnRealTimeShadow(CRealTimeShadow *shdw) {
+     if (shdw->m_pOwner) {
+@@ -56,6 +57,9 @@
+ 
+ inline void DoShadowThisFrame_hook(CRealTimeShadowManager* thiz, CPhysical *physical) {
+     s_pRealTimeShadowMan = thiz;
++    // Real sun shadows (EAGLE graphics) already cover peds/vehicles: do not
++    // render GTA's projected realtime shadow textures on top of them.
++    if (gfx::GraphicsEngine::Get().ShouldSuppressGtaShadows()) return;
+     thiz->DoShadowThisFrame(physical);
+ }
+ 
