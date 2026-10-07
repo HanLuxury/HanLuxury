@@ -123,6 +123,10 @@ bool Install() {
     GtaRenderQueue* q = *g_sym.queue;
     if (!q) return false; // RenderQueue::Initialize() has not run yet
     if (!QueueLooksSane(q)) {
+        // The queue lives for the whole process (RenderQueue::Initialize runs
+        // once): a reading taken mid-update is retried on the next frames.
+        static int insane = 0;
+        if (++insane < 300) return false;
         RT_LOG("render-thread bridge NOT installed: queue pointers out of range");
         g_failed = true;
         return false;

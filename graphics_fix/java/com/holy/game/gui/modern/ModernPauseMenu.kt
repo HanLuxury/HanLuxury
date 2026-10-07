@@ -99,6 +99,7 @@ class ModernPauseMenu(private val activity: Activity) {
     private var settings: IntArray? = null
 
     private var exitArmedUntil = 0L
+    private var resetArmedUntil = 0L
     private var tappedValue = false
     private var hiding = false
     private val pendingActions = mutableListOf<() -> Unit>()
@@ -469,6 +470,7 @@ class ModernPauseMenu(private val activity: Activity) {
         if (!map && (rebuild || previous != id || rows.isEmpty())) {
             selectedRow = 0
             exitArmedUntil = 0L
+            resetArmedUntil = 0L
             buildRows()
             rowsScroll.scrollTo(0, 0)
         }
@@ -534,7 +536,8 @@ class ModernPauseMenu(private val activity: Activity) {
                 "Rumput dan tanaman mengikuti kamera. Mati = FPS lebih tinggi.", ON_OFF),
             ActionRow("Simpan pengaturan grafis",
                 "Simpan sekarang ke TESTLIT/SAMP/settings.ini (juga tersimpan otomatis).") { saveGraphics(it) },
-            ActionRow("Reset grafis ke default", "Kembalikan grafis klien ke preset Sedang.") { resetGraphics() }
+            ActionRow("Reset grafis ke default",
+                "Kembalikan grafis klien ke preset Sedang. Ketuk dua kali untuk konfirmasi.") { resetGraphics(it) }
         )
         TabId.AUDIO -> settingRows(
             slider(GtaSettings.SFX_VOLUME, "Volume efek suara",
@@ -600,9 +603,27 @@ class ModernPauseMenu(private val activity: Activity) {
         root.postDelayed({ row.descOverride = null; refreshRow(row) }, 1500L)
     }
 
-    private fun resetGraphics() {
-        ModernMenu.request(ModernMenu.REQUEST_GFX_RESET)
-        refreshSettingsSoon()
+    // Two taps, like "Keluar": one stray tap must not wipe the player's graphics.
+    private fun resetGraphics(row: ActionRow) {
+        val now = System.currentTimeMillis()
+        if (now < resetArmedUntil) {
+            resetArmedUntil = 0L
+            ModernMenu.request(ModernMenu.REQUEST_GFX_RESET)
+            row.descOverride = "Grafis dikembalikan ke Sedang."
+            refreshRow(row)
+            root.postDelayed({ row.descOverride = null; refreshRow(row) }, 1500L)
+            refreshSettingsSoon()
+            return
+        }
+        resetArmedUntil = now + EXIT_CONFIRM_MS
+        row.descOverride = "Ketuk sekali lagi untuk reset grafis."
+        refreshRow(row)
+        root.postDelayed({
+            if (System.currentTimeMillis() >= resetArmedUntil && row.descOverride != null) {
+                row.descOverride = null
+                refreshRow(row)
+            }
+        }, EXIT_CONFIRM_MS)
     }
 
     /** Preset/reset change many values natively: read them back after the game thread applied them. */

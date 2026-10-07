@@ -6,8 +6,40 @@
 #include "util/patch.h"
 #include "CDebugInfo.h"
 #include "graphics/GraphicsSettings.h"
+#include <cerrno>
+#include <mutex>
+#include <unistd.h>
 
 stSettings CSettings::m_Settings;
+
+namespace {
+// save() runs on the UI thread (login, client settings dialog, pause) and on
+// the game thread (GRAFIS menu, /fpslimit); toDefaults re-enters LoadSettings.
+std::recursive_mutex g_settingsLock;
+// Nothing is written before the file was read once: a save with empty
+// m_Settings would replace the player's file with defaults.
+bool g_settingsLoaded = false;
+
+void SettingsPath(char* out, size_t size) {
+	snprintf(out, size, "%sSAMP/settings.ini", g_pszStorage ? g_pszStorage : "");
+}
+
+// Write <file>.tmp, then rename over the file: a reader (or the next start
+// after the app was killed mid-save) sees the old file or the new one, never
+// a missing or half-written one. The old code deleted the file first.
+bool WriteSettingsFile(ini_table_s* config, const char* path) {
+	char tmp[0x200];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	if (ini_table_write_to_file(config, tmp)) {
+		if (rename(tmp, path) == 0) return true;
+		unlink(tmp);
+	}
+	// Storage that cannot rename over an existing file.
+	return ini_table_write_to_file(config, path);
+}
+
+void SaveSettings(int iIgnoreCategory, bool keepUnknownKeys);
+}
 
 static void ClearBackslashN(char *pStr, size_t size) {
 	for (size_t i = 0; i < size; i++) {
@@ -20,16 +52,10 @@ static void ClearBackslashN(char *pStr, size_t size) {
 
 void CSettings::toDefaults(int iCategory)
 {
-	char buff[0x7F];
-	sprintf(buff, "%sSAMP/settings.ini", g_pszStorage);
-
-	FILE *pFile = fopen(buff, "w");
-
-	fwrite("[gui]", 1, 6, pFile);
-
-	fclose(pFile);
-
-	save(iCategory);
+	std::lock_guard<std::recursive_mutex> lock(g_settingsLock);
+	// Same result as before (keys of the category are left out, the reload
+	// fills in defaults), written atomically instead of truncating the file.
+	SaveSettings(iCategory, false);
 	LoadSettings(m_Settings.szNickName);
 
 	CHUD::ChangeChatTextSize(m_Settings.iChatFontSize);
@@ -38,11 +64,26 @@ void CSettings::toDefaults(int iCategory)
 
 void CSettings::save(int iIgnoreCategory)
 {
-	char buff[0x7F];
-	sprintf(buff, "%sSAMP/settings.ini", g_pszStorage);
-	remove(buff);
+	// Normal save: keys written by the launcher/Java (host, tutorial_done,
+	// voice, ...) are kept; the client's own keys are overwritten.
+	SaveSettings(iIgnoreCategory, iIgnoreCategory == 0);
+}
+
+namespace {
+void SaveSettings(int iIgnoreCategory, bool keepUnknownKeys)
+{
+	using CS = CSettings;
+	auto& m_Settings = CS::m_Settings;
+	std::lock_guard<std::recursive_mutex> lock(g_settingsLock);
+	if (!g_settingsLoaded || !g_pszStorage) {
+		Log("Settings: not loaded yet, save skipped");
+		return;
+	}
+	char buff[0x200];
+	SettingsPath(buff, sizeof(buff));
 
 	ini_table_s *config = ini_table_create();
+	if (keepUnknownKeys) ini_table_read_from_file(config, buff);
 
 	ini_table_create_entry(config, "client", "name", m_Settings.szNickName);
 	ini_table_create_entry(config, "client", "ip", m_Settings.szIp);
@@ -82,8 +123,10 @@ void CSettings::save(int iIgnoreCategory)
 	// Client graphics options (GRAFIS tab), [graphics] section.
 	GraphicsSettings::Save(config);
 
-	ini_table_write_to_file(config, buff);
+	if (!WriteSettingsFile(config, buff))
+		Log("Settings: cannot write %s (errno %d)", buff, errno);
 	ini_table_destroy(config);
+}
 }
 
 
@@ -99,17 +142,28 @@ void CSettings::LoadSettings(const char *szNickName, int iChatLines)
 	}
 
 	Log("Loading settings..");
+	std::lock_guard<std::recursive_mutex> lock(g_settingsLock);
 
-	char buff[0x7F];
-	sprintf(buff, "%sSAMP/settings.ini", g_pszStorage);
+	char buff[0x200];
+	SettingsPath(buff, sizeof(buff));
 
 	ini_table_s *config = ini_table_create();
 	Log("Opening settings: %s", buff);
 	if (!ini_table_read_from_file(config, buff))
 	{
-		Log("Cannot load settings, exiting...");
-		CGame::exitGame();
-		return;
+		// A save interrupted by the old remove()+rewrite left only the temp file.
+		char tmp[0x200];
+		snprintf(tmp, sizeof(tmp), "%s.tmp", buff);
+		ini_table_destroy(config);
+		config = ini_table_create();
+		if (!ini_table_read_from_file(config, tmp) || rename(tmp, buff) != 0)
+		{
+			ini_table_destroy(config);
+			Log("Cannot load settings, exiting...");
+			CGame::exitGame();
+			return;
+		}
+		Log("Settings restored from %s", tmp);
 	}
 
 	snprintf(m_Settings.szNickName, sizeof(m_Settings.szNickName), "__android_%d%d", rand() % 1000, rand() % 1000);
@@ -120,11 +174,12 @@ void CSettings::LoadSettings(const char *szNickName, int iChatLines)
 
 	memset(m_Settings.szIp, 0, sizeof(m_Settings.szIp));
 	const char *szIp = ini_table_get_entry(config, "client", "ip");
-	strcpy(m_Settings.szIp, szIp);
+	if (szIp) strncpy(m_Settings.szIp, szIp, sizeof(m_Settings.szIp) - 1);
 
 	m_Settings.port = ini_table_get_entry_as_int(config, "client", "port", 7777);
 
-	std::string szName = ini_table_get_entry(config, "client", "name");
+	const char *pName = ini_table_get_entry(config, "client", "name");
+	std::string szName = pName ? pName : "";
 	const char *szPassword = ini_table_get_entry(config, "client", "password");
 	const char *pPassword = ini_table_get_entry(config, "client", "player_password");
 
@@ -140,23 +195,24 @@ void CSettings::LoadSettings(const char *szNickName, int iChatLines)
 	m_Settings.isTestMode = ini_table_get_entry_as_int(config, "client", "test", 0);
 	g_bIsTestMode = (bool)m_Settings.isTestMode;
 
-	std::string szFontName = ini_table_get_entry(config, "gui", "Font");
+	const char *pFontName = ini_table_get_entry(config, "gui", "Font");
+	std::string szFontName = pFontName ? pFontName : "";
 
 	if(pPassword)
 	{
-		strcpy(m_Settings.player_password, pPassword);
+		strncpy(m_Settings.player_password, pPassword, sizeof(m_Settings.player_password) - 1);
 	}
 	if ( !szName.empty() )
 	{
-		strcpy(m_Settings.szNickName, szName.c_str());
+		strncpy(m_Settings.szNickName, szName.c_str(), sizeof(m_Settings.szNickName) - 1);
 	}
 	if (szPassword)
 	{
-		strcpy(m_Settings.szPassword, szPassword);
+		strncpy(m_Settings.szPassword, szPassword, sizeof(m_Settings.szPassword) - 1);
 	}
 	if ( !szFontName.empty() )
 	{
-		strcpy(m_Settings.szFont, szFontName.c_str());
+		strncpy(m_Settings.szFont, szFontName.c_str(), sizeof(m_Settings.szFont) - 1);
 	}
 
 	ClearBackslashN(m_Settings.szNickName, sizeof(m_Settings.szNickName));
@@ -193,6 +249,16 @@ void CSettings::LoadSettings(const char *szNickName, int iChatLines)
 	GraphicsSettings::Load(config);
 
 	ini_table_destroy(config);
+	g_settingsLoaded = true;
+}
+
+bool CSettings::SaveNow()
+{
+	std::lock_guard<std::recursive_mutex> lock(g_settingsLock);
+	if (!g_settingsLoaded) return false;
+	GraphicsSettings::ConsumeDirty();
+	save();
+	return true;
 }
 
 extern "C"

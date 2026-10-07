@@ -50,6 +50,8 @@ std::atomic<bool> installed{false};
 thread_local bool insideSwap=false;
 std::mutex settingsMutex;
 Settings settings;
+// Bumped by SetSettings: a changed option retries setups that failed before.
+std::atomic<unsigned> settingsGeneration{1};
 // Written by SetFrameEnvironment (render thread via SubmitBeforeHud, or any
 // thread), read by Render() on the render thread. Not thread_local: the old
 // thread_local copy was written on the game thread and never seen by GL.
@@ -266,6 +268,10 @@ struct ContextState {
     bool surfaceUsable=false;
     CompatPipeline compat;
     std::atomic<bool> retiring{false};
+    // GL_OUT_OF_MEMORY / incomplete FBO / failed swap are transient (texture-
+    // heavy maps streaming in, surface resize): wait, then try again. Only
+    // shaders that fail to build three times stop post-processing (failed).
+    unsigned retryFrames=0,setupFailures=0,settingsSeen=0;
     EGLSurface gameSurface=EGL_NO_SURFACE; // Hanya diakses thread pemilik context.
     GLuint vao=0,dirt=0,depthTexture=0;
     int width=0,height=0;GLenum colorFormat=0,depthFormat=0;
@@ -380,7 +386,10 @@ void CleanupCurrent() {
 void Retire(EGLDisplay d,EGLContext c) {
     WorldSunShadow::Retire(d,c);
     std::lock_guard<std::mutex> lock(statesMutex);
-    auto it=states.find({d,c});if(it!=states.end()) it->second->retiring=true;
+    auto it=states.find({d,c});if(it==states.end()) return;
+    // GL names die with the context (no GL calls in destructors). Erase so a
+    // reused EGLContext handle starts fresh instead of staying "retiring".
+    it->second->retiring=true;states.erase(it);
 }
 bool ReadProjection(GLuint program,float* projection) {
     if(!program) return false;
@@ -599,6 +608,9 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
     if(beforeHud) UpdateEnvironment(s,CurrentEnvironment(),haveWorld ? &world : nullptr);
     const LookProfile look=BuildLook(GetSettings(),s.environment,s.smooth.traits,s.smooth.sunVisibility);
     const Settings& cfg=look.config;if(!cfg.enabled) return false;
+    const unsigned generation=settingsGeneration.load(std::memory_order_relaxed);
+    if(s.settingsSeen!=generation) { s.settingsSeen=generation;s.retryFrames=0;s.setupFailures=0;s.failed=false; }
+    if(s.retryFrames) { --s.retryFrames;return false; }
     // Hanya window surface, bukan EGL pbuffer milik CEF/video/background task.
     if(s.checkedSurface!=surface) {
         s.checkedSurface=surface;s.surfaceUsable=false;s.surfaceConfig=nullptr;
@@ -642,7 +654,12 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
         EGLint colorSpace=0;
         if(extensions && std::strstr(extensions,"EGL_KHR_gl_colorspace"))
             eglQuerySurface(display,surface,0x309D,&colorSpace);
-        bool rendered=s.compat.Render(w,h,alpha ? GL_RGBA : GL_RGB,colorSpace==0x3089,look,s.failed);
+        bool compatFailed=false;
+        bool rendered=s.compat.Render(w,h,alpha ? GL_RGBA : GL_RGB,colorSpace==0x3089,look,compatFailed);
+        if(compatFailed) {
+            if(++s.setupFailures>=3) s.failed=true;else s.retryFrames=180;
+            FX_LOG("PostFX GLES2 setup failed %ux%s",s.setupFailures,s.failed ? ", disabled" : ", retry in 180 frames");
+        }
         if(rendered && beforeHud) s.processedBeforeHud=true;
         return rendered;
     }
@@ -684,8 +701,17 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
         windowDepth=matrix && Math::Projection(s.projection,s.inverse,s.forwardSign)
             && std::abs(s.depthRange[1]-s.depthRange[0])>1e-6f;
     }
-    if(!s.ready && !s.InitPrograms()) { s.Destroy();s.failed=true;return false; }
-    if(!s.Targets(w,h,color)) { s.Destroy();s.failed=true;return false; }
+    if(!s.ready && !s.InitPrograms()) {
+        s.Destroy();
+        if(++s.setupFailures>=3) s.failed=true;else s.retryFrames=120;
+        FX_LOG("PostFX shaders failed %ux%s",s.setupFailures,s.failed ? ", disabled" : ", retry in 120 frames");
+        return false;
+    }
+    if(!s.Targets(w,h,color)) {
+        s.DestroyTargets();s.retryFrames=180;
+        FX_LOG("PostFX targets %dx%d unavailable (GPU memory), retry in 180 frames",w,h);
+        return false;
+    }
     if(windowDepth) windowDepth=s.DepthStorage(depthFormat);
     if(windowDepth) depthTexture=s.depthTexture;
     glBindVertexArray(s.vao);
@@ -724,8 +750,12 @@ void EndFrame(EGLBoolean result) {
     auto s=CurrentState(false);if(!s) return;
     s->processedBeforeHud=false;
     // Tidak memanggil eglGetError (error tetap dapat dibaca oleh game).
-    // Gagal swap: stop render sampai context/surface lifecycle berikutnya.
-    if(result==EGL_FALSE) s->failed=true;
+    // Gagal swap (BAD_ALLOC/BAD_SURFACE saat memori penuh atau resize) bersifat
+    // sementara: cek ulang surface dan coba lagi, jangan mati permanen.
+    if(result==EGL_FALSE) {
+        s->checkedSurface=EGL_NO_SURFACE;s->surfaceUsable=false;
+        s->retryFrames=std::max(s->retryFrames,30u);
+    }
 }
 // With the render-thread bridge, post-processing runs before the HUD every
 // frame. The swap fallback (which would also grade HUD/chat/CEF/dialogs and,
@@ -900,6 +930,7 @@ void SetSettings(const Settings& input) {
         l.radius=Clamp(l.radius,0.01f,2,0.35f);l.intensity=Clamp(l.intensity,0,2,0.04f);l.pulse=Clamp(l.pulse,0,1,0);
     }
     {std::lock_guard<std::mutex> lock(settingsMutex);settings=c;}
+    settingsGeneration.fetch_add(1,std::memory_order_relaxed);
     WorldSunShadow::RequestWorldDepth(c.enabled);
 }
 void SetFrameEnvironment(const FrameEnvironment& environment) {

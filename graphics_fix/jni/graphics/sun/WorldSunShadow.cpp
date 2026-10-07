@@ -32,6 +32,8 @@ std::atomic<unsigned> programGeneration{1};
 thread_local bool replaying=false;
 std::mutex settingsMutex;
 Settings settings;
+// Bumped by SetSettings: a changed option retries setups that failed before.
+std::atomic<unsigned> settingsGeneration{1};
 constexpr GLsizei kMinCasterIndices=12; // smaller draws cast no visible shadow
 void Toggle(GLenum key,GLboolean enabled) { if(enabled) glEnable(key);else glDisable(key); }
 template<class T> T Proc(const char* name) { return reinterpret_cast<T>(eglGetProcAddress(name)); }
@@ -297,6 +299,12 @@ struct State {
     Caps caps;
     bool checked=false,failed=false,active=false,shadow=false,reported=false,reportedDepth=false;
     std::atomic<bool> retired{false};
+    // Allocation failures (GL_OUT_OF_MEMORY / incomplete FBO, e.g. while a
+    // texture-heavy SA-MP mapping streams in) are transient: back off, use a
+    // smaller sun map, keep the world depth/camera for EglPostFX meanwhile.
+    unsigned setupRetry=0,setupFailures=0,settingsSeen=0,depthRetry=0;
+    int resolutionCap=4096,maxTexture=0;
+    bool shadowBroken=false; // shaders do not build: the only permanent stop
     Settings config;
     Frame frame;
     Frame queued;
@@ -617,7 +625,8 @@ void SetSettings(const Settings& input) {
     value.radius=std::isfinite(value.radius) ? std::clamp(value.radius,15.0f,250.0f):70.0f;
     value.darkness=std::isfinite(value.darkness) ? std::clamp(value.darkness,0.0f,0.85f):0.50f;
     value.softness=std::isfinite(value.softness) ? std::clamp(value.softness,0.5f,3.0f):1.0f;
-    std::lock_guard<std::mutex> lock(settingsMutex);settings=value;
+    {std::lock_guard<std::mutex> lock(settingsMutex);settings=value;}
+    settingsGeneration.fetch_add(1,std::memory_order_relaxed);
 }
 Settings GetSettings() {std::lock_guard<std::mutex> lock(settingsMutex);return settings;}
 static void BeginWorldImpl(const Frame& frame) {
@@ -630,8 +639,19 @@ static void BeginWorldImpl(const Frame& frame) {
     std::shared_ptr<State> s;
     {std::lock_guard<std::mutex> lock(statesMutex);auto& slot=states[{display,context}];
         if(!slot) slot=std::make_shared<State>();s=slot;}
-    if(s->retired.load()||s->failed) return;
-    if(!s->checked) {s->checked=true;if(!s->caps.Init()) {s->failed=true;return;}}
+    if(s->retired.load()) return;
+    if(!s->checked) {
+        s->checked=true;if(!s->caps.Init()) {s->failed=true;return;}
+        glGetIntegerv(GL_MAX_TEXTURE_SIZE,&s->maxTexture);
+        if(s->maxTexture>=512) s->resolutionCap=std::min(s->resolutionCap,s->maxTexture);
+    }
+    if(s->failed) return; // unusable context (no GLES caps)
+    const unsigned generation=settingsGeneration.load(std::memory_order_relaxed);
+    if(s->settingsSeen!=generation) {
+        s->settingsSeen=generation;s->setupRetry=0;s->setupFailures=0;s->depthRetry=0;s->shadowBroken=false;
+        s->resolutionCap=s->maxTexture>=512 ? std::min(4096,s->maxTexture):4096;
+    }
+    config.resolution=std::min(config.resolution,s->resolutionCap);
     // Resource setup changes program/vertex bindings. Do not enter it inside
     // transform feedback or a query, even for the first automatic world draw.
     if(UnsafeQueryState(s->caps)) return;
@@ -650,7 +670,8 @@ static void BeginWorldImpl(const Frame& frame) {
     s->worldDepthFormat=s->caps.es3&&(config.enabled||depthWanted.load(std::memory_order_relaxed))
         ? CopyableDepthFormat(s->output):0;
     s->active=true;s->shadow=false;active=s;
-    if(!config.enabled||!frame.valid||!std::isfinite(frame.sunlight)||frame.sunlight<=0) return;
+    if(!config.enabled||s->shadowBroken||!frame.valid||!std::isfinite(frame.sunlight)||frame.sunlight<=0) return;
+    if(s->setupRetry) {--s->setupRetry;return;}
     // Sun shadow pass of this frame.
     Math::StableDirection(frame.toSun,s->stableSun);
     if(!Math::LightCamera(frame.focus,s->stableSun,config.radius,config.resolution,s->lightAxis,
@@ -659,7 +680,15 @@ static void BeginWorldImpl(const Frame& frame) {
     if(s->replayCamera&&!s->haveCamera) return;
     FullGuard guard(s->caps);ReplayScope scope;
     if(!s->EnsureProgram()||!s->EnsureSun()||(s->replayCamera&&!s->EnsureCamera(s->viewport[2],s->viewport[3]))) {
-        s->failed=true;s->Destroy();active.reset();SUN_LOG("SUN4 resource setup failed");return;
+        // Only the shadow targets are freed. The world scope stays active, so
+        // EndWorld still copies depth and publishes the camera this frame.
+        s->sun.Destroy();s->camera.Destroy();s->resolution=0;s->width=s->height=0;
+        if(!s->program&&++s->setupFailures>=3) s->shadowBroken=true;
+        s->resolutionCap=std::max(512,config.resolution/2);
+        s->setupRetry=180;
+        SUN_LOG("SUN4 shadow targets unavailable at %d, retry at %d%s",config.resolution,s->resolutionCap,
+                s->shadowBroken ? " (shaders failed, sun shadows off)":"");
+        return; // FullGuard restores the game's GL state
     }
     if(s->replayCamera) {
         float vp[16];Math::Multiply(s->cameraProjection,s->cameraView,vp);
@@ -708,8 +737,10 @@ void AfterSwap(EGLBoolean result) {
 }
 static bool CopyWorldDepth(State& s) {
     if(!s.worldDepthFormat) return false;
+    if(s.depthRetry) {--s.depthRetry;return false;}
     const int w=s.viewport[2],h=s.viewport[3];
-    if(!s.world.Ensure(w,h,s.worldDepthFormat)) {s.worldDepthFormat=0;return false;}
+    // Out of memory: do not try to allocate again on every frame.
+    if(!s.world.Ensure(w,h,s.worldDepthFormat)) {s.worldDepthFormat=0;s.depthRetry=180;return false;}
     glBindFramebuffer(GL_READ_FRAMEBUFFER,GLuint(s.output));
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER,s.world.fbo);
     glBlitFramebuffer(s.viewport[0],s.viewport[1],s.viewport[0]+w,s.viewport[1]+h,0,0,w,h,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
@@ -791,8 +822,13 @@ void CleanupCurrent() {
     s->Destroy();
 }
 void Retire(EGLDisplay display,EGLContext context) {
+    // Called on a thread where the context is not current. Its GL names die
+    // with the context; State has no GL calls in its destructor. Erase the
+    // entry: EGL may hand the same handle to the next context, which must
+    // not inherit "retired". Thread-local references keep the object alive.
     std::lock_guard<std::mutex> lock(statesMutex);auto it=states.find({display,context});
-    if(it!=states.end()) it->second->retired=true;
+    if(it==states.end()) return;
+    it->second->retired=true;states.erase(it);
 }
 void SubmitWorldEnd(const Frame& next) {
     if(GraphicsRenderThread::Ready()) {

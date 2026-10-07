@@ -345,6 +345,7 @@ extern "C"
 
 #include "modloader/ModLoader.h"
 #include "modloader/HookScope.h" // ML_HOOK_SCOPE(); SHADOWHOOK_STACK_SCOPE() tidak boleh dipakai lagi
+#include "vicecity/ViceCity.h"   // map Vice City: tekstur model-modelnya ikut lewat hook RwTextureRead
 
 // Note: struct RwTexture dan RwRaster TIDAK diredifinisikan di sini 
 // karena sudah ada di game/RW/RenderWare.h
@@ -436,6 +437,10 @@ RwTexture* hook_RwTextureRead(const char* name, const char* maskName) {
 
     if (RwTexture* fromTxd = ml::FindTexture(name)) return fromTxd;
 
+    // Map Vice City: tekstur model yang sedang dibaca game, dari file .txd (format PC) di TESTLIT/vice_city.
+    // Tekstur yang tidak ada di sana tetap dicari game di texdb-nya sendiri.
+    if (RwTexture* fromViceCity = vc::FindTexture(name)) return fromViceCity;
+
     return orig_RwTextureRead(name, maskName);
 }
 
@@ -455,6 +460,7 @@ void InitializeHolyModloader() {
     if(g_libGTASA == 0) {
         __android_log_print(ANDROID_LOG_ERROR, "HolyModloader", "g_libGTASA masih 0. Hooking dibatalkan!");
         ml::SetTextureHookInstalled(false);
+        vc::SetTextureHookInstalled(false);
         return;
     }
 
@@ -498,15 +504,19 @@ void InitializeHolyModloader() {
             "ShadowHook init failed: init=%d errno=%d / %s",
             shInit, shErr, shadowhook_to_errmsg(shErr));
         ml::SetTextureHookInstalled(false);
+        vc::SetTextureHookInstalled(false);
         return;
     }
     // Mode yang benar-benar aktif; proxy di modloader menyesuaikan diri (modloader/HookScope.h).
     __android_log_print(ANDROID_LOG_INFO, "HolyModloader", "ShadowHook mode aktif: %s",
         shadowhook_get_mode() == SHADOWHOOK_MODE_SHARED ? "SHARED" : "UNIQUE");
 
-    // RwTextureRead hanya di-hook kalau folder mod memang berisi PNG atau TXD lepas yang aktif.
-    if (!ml::WantsTextureHook()) {
+    // RwTextureRead hanya di-hook kalau folder mod memang berisi PNG atau TXD lepas yang aktif, atau kalau
+    // map Vice City terpasang (tekstur modelnya dan minimap.txd dibaca lewat hook yang sama).
+    const bool viceCityWantsHook = vc::WantsTextureHook();
+    if (!ml::WantsTextureHook() && !viceCityWantsHook) {
         __android_log_print(ANDROID_LOG_INFO, "HolyModloader", "Tidak ada PNG/TXD lepas yang aktif: RwTextureRead tidak di-hook.");
+        vc::SetTextureHookInstalled(false);
         return;
     }
 
@@ -521,6 +531,7 @@ void InitializeHolyModloader() {
         orig_RwTextureRead = nullptr;
     }
     ml::SetTextureHookInstalled(orig_RwTextureRead != nullptr);
+    vc::SetTextureHookInstalled(orig_RwTextureRead != nullptr);
 }
 // =========================================================================
 // ===================== HOLY MODLOADER SYSTEM END =========================

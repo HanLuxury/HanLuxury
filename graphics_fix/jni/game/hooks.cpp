@@ -27,6 +27,7 @@
 #include "../java_systems/cef/CEF3D.h"
 #include "PhoneCameraNative.h"
 #include "../modloader/ModLoader.h"
+#include "../vicecity/ViceCity.h"
 
 extern CPedSamp *g_pCurrentFiredPed;
 
@@ -82,7 +83,10 @@ stFile* NvFOpen(const char* r0, const char* r1, int r2, int r3)
 	// The modloader decides what is opened: the overlay of an IMG archive, a file from the mod folder,
 	// or the game's own file (see ml::OpenGameFile in modloader/ModLoader.h for the exact order).
 	char opened[1024];
-	FILE *f = ml::OpenGameFile(r1, &RemapGameFile, &BuildGameFilePath, opened, sizeof(opened));
+	// Map Vice City: arsip model-modelnya (VICECITY\GTA3.IMG) hanya ada di memori, tidak di penyimpanan.
+	FILE *f = vc::OpenGameFile(r1);
+	if(f) snprintf(opened, sizeof(opened), "%s (arsip model Vice City)", r1);
+	else f = ml::OpenGameFile(r1, &RemapGameFile, &BuildGameFilePath, opened, sizeof(opened));
 	Log("%s", opened);
 	if(!f)
 	{
@@ -806,6 +810,10 @@ void InstallSpecialHooks()
 
 	CHook::InlineHook("_Z11OS_FileReadPvS_i", &OS_FileRead_hook, &OS_FileRead);
 	CHook::Redirect("_Z7NvFOpenPKcS0_bb", &NvFOpen);
+
+	// Map Vice City: model-modelnya didaftarkan tepat sebelum game membaca direktori arsip IMG
+	// (CStreaming::Init2). Tanpa folder TESTLIT/vice_city hook ini tidak mengubah apa-apa.
+	vc::InstallHooks();
 
 	CHook::Redirect("_ZN5CGame20InitialiseRenderWareEv", &CGame::InitialiseRenderWare);
 	CHook::InlineHook("_ZN14MainMenuScreen6UpdateEf", &MainMenuScreen__Update_hook, &MainMenuScreen__Update);

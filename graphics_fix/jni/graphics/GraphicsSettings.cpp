@@ -5,6 +5,7 @@
 #include "../vendor/ini/config.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 
 namespace GraphicsSettings {
 namespace {
@@ -35,7 +36,8 @@ constexpr std::array<Spec,COUNT> kSpecs{{
 }};
 constexpr int32_t kDefaultPreset=1;
 std::array<int32_t,COUNT> values{};
-bool initialised=false,dirty=false;
+bool initialised=false;
+std::atomic<bool> dirty{false}; // set on the game thread, consumed by a save on any thread
 
 bool Valid(int32_t id) { return id>=0 && id<COUNT; }
 void LoadPreset(int32_t preset) {
@@ -85,7 +87,7 @@ void ResetDefaults() {
     dirty=true;
     Apply();
 }
-bool ConsumeDirty() { const bool was=dirty;dirty=false;return was; }
+bool ConsumeDirty() { return dirty.exchange(false); }
 
 void Apply() {
     EnsureInitialised();

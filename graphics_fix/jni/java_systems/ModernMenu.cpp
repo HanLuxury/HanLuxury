@@ -453,6 +453,7 @@ void CModernMenu::ProcessRequests(CMobileMenu* menu) {
             case REQUEST_GFX_RESET:
                 if (state != eState::PAUSE) break;
                 GraphicsSettings::ResetDefaults();
+                g_settingsSaveAtMs = NowMs() + 800; // saved like any other change
                 break;
 
             case REQUEST_MAP_TO_PAUSE:
@@ -757,6 +758,15 @@ Java_com_holy_game_gui_modern_ModernMenu_nativeSetRadarRect(JNIEnv* env, jclass 
     CHUD::radarPos.y = gtaY;
     CHUD::radarSize.x = gtaWidth;
     CHUD::radarSize.y = gtaHeight;
+}
+
+// UI thread (Activity.onPause, "Keluar"): settings.ini is written at once,
+// because the game thread no longer runs while the app is in the background
+// and Android may kill the process there. GTA's own gta_sa.set stays on the
+// game thread (REQUEST_GFX_SAVE / closing the menu).
+extern "C" JNIEXPORT void JNICALL
+Java_com_holy_game_gui_modern_ModernMenu_nativeSaveSettingsNow(JNIEnv* env, jclass clazz) {
+    CSettings::SaveNow();
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

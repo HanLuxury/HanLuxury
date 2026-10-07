@@ -1,5 +1,5 @@
-PERBAIKAN GRAFIS (TAHAP 1 + 2) - GTA SA Android 2.10 arm64, SA-MP, TANPA AML
-=============================================================================
+PERBAIKAN GRAFIS (TAHAP 1 + 2 + 3) + VICE CITY - GTA SA Android 2.10 arm64, TANPA AML
+=====================================================================================
 Ini perbaikan pada sistem grafis YANG SUDAH ADA di source Anda
 (graphics/postfx, graphics/sun, game/Shadow, menu GRAFIS). Tidak ada engine
 kedua, tidak ada menu baru, tidak ada resource Android baru.
@@ -11,9 +11,16 @@ CARA PASANG
    otomatis oleh CMake GLOB_RECURSE / find di Android.mk).
    Tahap 2 menambah file yang ditimpa: game/patches.cpp, game/hooks.cpp,
    game/CRenderTarget.cpp, gui/imgui_impl_renderware.cpp.
-   Patch berisi tahap 1 + 2 sekaligus (diterapkan ke source ASLI).
+   Tahap 3 menambah: CSettings.cpp/.h, vendor/ini/config.cpp, dan modul
+   Vice City (folder vicecity/ + 14 file yang diubahnya: Android.mk,
+   CMakeLists.txt, game/Streaming.cpp, game/World.cpp, game/hooks.cpp,
+   game/textdraw.cpp, main.cpp, modloader/*, net/netgame.cpp,
+   net/scriptrpc.cpp). Panduan Vice City: jni/vicecity/README.md.
+   Patch berisi tahap 1 + 2 + 3 + Vice City sekaligus (ke source ASLI
+   jni_last). Pakai: cd jni && git apply ../graphics_fix/patches/jni.patch
    Atau: cd jni && git apply ../graphics_fix/patches/jni.patch
-2. Kotlin: salin java/ ke folder java project (timpa 4 file).
+2. Java/Kotlin: salin java/ ke folder java project (timpa 5 file,
+   termasuk com/holy/game/core/GTASA.java).
    Atau: git apply patches/java.patch
 3. Build seperti biasa. AML tidak dibutuhkan lagi untuk grafis.
 
@@ -57,6 +64,35 @@ PENYEBAB FLICKER / STUTTER LAIN (TAHAP 2, sudah diperbaiki)
 15. FPS limiter tidak berfungsi (selalu 60). -> nilai settings.ini /
     /fpslimit / baris "Pembatas frame" diterapkan (20..refresh layar).
 
+TAHAP 3: GRAFIS HILANG / SETTING TIDAK TERSIMPAN SAAT RELOG
+------------------------------------------------------------
+16. Grafis hilang permanen (di semua cuaca) setelah satu kali gagal alokasi
+    memori GPU, biasanya dekat mapping penuh tekstur: PostFX dan bayangan
+    matahari memasang flag "failed" yang tidak pernah dihapus, relog tidak
+    menolong. -> sekarang dicoba lagi tiap ~3 detik; peta bayangan turun
+    ukuran (4096 -> 2048 -> 1024 -> 512); depth dunia tetap dipakai PostFX
+    (langit, jalan basah, kabut tetap ada). Ganti setting = coba lagi
+    langsung. Gagal swap (eglSwapBuffers) juga tidak mematikan PostFX.
+17. settings.ini disimpan dengan remove() lalu tulis ulang. Kalau game
+    ditutup/di-kill saat itu, bagian [graphics] (paling akhir) hilang, dan
+    simpan saat login berikutnya mengunci default. -> tulis ke .tmp lalu
+    rename (atomik), cek hasil tulis, fsync, kunci antar-thread.
+18. Perubahan grafis hanya disimpan oleh game thread, yang berhenti saat
+    aplikasi di-minimize. -> settings.ini disimpan langsung saat onPause
+    dan sebelum "Keluar".
+19. Parser ini: nama dengan [TAG] (mis. [EAGLE]Budi) merusak [client] dan
+    crash strcpy NULL; baris terakhir tanpa newline hilang; komentar/
+    nilai panjang menulis di luar buffer. -> diperbaiki, dites ASan.
+20. Simpan biasa sekarang mempertahankan key milik launcher (host,
+    tutorial_done, voice, ...), tidak dihapus lagi.
+21. "Reset grafis ke default" sekarang perlu 2 ketukan (seperti Keluar).
+
+VICE CITY (file kiriman Anda)
+-----------------------------
+Dipasang utuh: patch-nya menempel bersih di atas perbaikan grafis, tidak
+ada bentrok (hooks.cpp dan main.cpp digabung otomatis). Cara pakai, file
+map, dan filterscript server: jni/vicecity/README.md.
+
 FITUR (memakai sistem yang ada)
 -------------------------------
 - Sinar matahari / god rays: sudah ada (light_shafts). Sekarang terhalang
@@ -91,7 +127,9 @@ Texture Quality. Belum dibuat. (FXAA sudah dibuat di tahap 2.)
 
 STATUS PENGECEKAN
 -----------------
-- 18 file C++ yang diubah lolos syntax-check aarch64 (clang, -Wall).
+- Tahap 3: 26 file C++ (termasuk modul Vice City) lolos syntax-check
+  aarch64. Parser ini dites di host dengan ASan/UBSan.
+- 18 file C++ tahap 1+2 lolos syntax-check aarch64 (clang, -Wall).
   Error main.cpp mcontext_t dan voice/Memory.hpp std::memcpy hanya dari
   header host, sama persis dengan file asli.
 - patches/jni.patch dan java.patch lolos "git apply --check" ke source asli.
@@ -107,6 +145,17 @@ STATUS PENGECEKAN
     "SUN4 world shadows rendered"
     "Scene boundary: depth=world copy"
     "New fps limit = ..."
+    "SUN4 shadow targets unavailable" / "PostFX targets ... unavailable"
+      (kalau muncul: memori GPU penuh, grafis mencoba lagi sendiri)
+
+MASIH DICEK (menyusul)
+----------------------
+- FC (force close) saat mendekati mapping penuh tekstur: tahap 3 sudah
+  membuat grafis tidak mati permanen, tapi penyebab FC-nya sendiri masih
+  diperiksa (sisi objek material SA-MP dan replay bayangan). Tolong kirim
+  log crash: logcat dari baris "Fatal signal" / "backtrace" sampai bawah,
+  atau file tombstone. Itu yang paling cepat menunjukkan penyebabnya.
+- Cuaca server di luar 0..22 (SetWeather aneh) dan efeknya ke grafis.
 
 BELUM DIKERJAKAN (tahap berikut)
 --------------------------------

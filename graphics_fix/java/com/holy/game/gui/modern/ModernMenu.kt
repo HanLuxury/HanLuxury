@@ -52,6 +52,24 @@ object ModernMenu {
     @JvmStatic
     external fun nativeIsConnected(): Boolean
 
+    /** Writes settings.ini right now (any thread). */
+    @JvmStatic
+    external fun nativeSaveSettingsNow()
+
+    /**
+     * Saves the client settings immediately. Called from Activity.onPause and
+     * before exiting: the game thread does not run in the background and
+     * Android may kill the process there, losing a pending save.
+     */
+    @JvmStatic
+    fun saveSettingsNow() {
+        try {
+            nativeSaveSettingsNow()
+        } catch (t: Throwable) {
+            // Native library not loaded yet (early pause): nothing to save.
+        }
+    }
+
     /** Radar rectangle: screen pixels (x1, y1, x2, y2) and GTA 640x480 units. */
     @JvmStatic
     external fun nativeSetRadarRect(
@@ -224,6 +242,8 @@ object ModernMenu {
 
     internal fun exitGame() {
         // Save settings first: exitGame() ends the process right away.
+        // settings.ini now on this thread; gta_sa.set on the game thread.
+        saveSettingsNow()
         request(REQUEST_GFX_SAVE)
         activity.window.decorView.postDelayed({ (activity as? Samp)?.exitGame() }, 250L)
     }

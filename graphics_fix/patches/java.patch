@@ -1,3 +1,17 @@
+diff --git a/java/com/holy/game/core/GTASA.java b/java/com/holy/game/core/GTASA.java
+index 497fe1b..8ff038d 100644
+--- a/java/com/holy/game/core/GTASA.java
++++ b/java/com/holy/game/core/GTASA.java
+@@ -103,6 +103,9 @@ public class GTASA extends WarMedia {
+     public void onPause()
+     {
+         System.out.println("GTASA onPause");
++        // Client settings (GRAFIS etc.): write now, the process may be killed
++        // while it is in the background.
++        com.holy.game.gui.modern.ModernMenu.saveSettingsNow();
+         super.onPause();
+     }
+ 
 diff --git a/java/com/holy/game/gui/modern/GtaSettings.kt b/java/com/holy/game/gui/modern/GtaSettings.kt
 index c3b9503..737e2e9 100644
 --- a/java/com/holy/game/gui/modern/GtaSettings.kt
@@ -99,7 +113,7 @@ index 5a7f6f2..c8ce484 100644
          return true
      }
 diff --git a/java/com/holy/game/gui/modern/ModernMenu.kt b/java/com/holy/game/gui/modern/ModernMenu.kt
-index a5bec4b..6092447 100644
+index a5bec4b..03cea6e 100644
 --- a/java/com/holy/game/gui/modern/ModernMenu.kt
 +++ b/java/com/holy/game/gui/modern/ModernMenu.kt
 @@ -36,6 +36,8 @@ object ModernMenu {
@@ -111,19 +125,46 @@ index a5bec4b..6092447 100644
  
      @JvmStatic
      external fun nativeRequest(request: Int)
-@@ -221,7 +223,9 @@ object ModernMenu {
+@@ -50,6 +52,24 @@ object ModernMenu {
+     @JvmStatic
+     external fun nativeIsConnected(): Boolean
+ 
++    /** Writes settings.ini right now (any thread). */
++    @JvmStatic
++    external fun nativeSaveSettingsNow()
++
++    /**
++     * Saves the client settings immediately. Called from Activity.onPause and
++     * before exiting: the game thread does not run in the background and
++     * Android may kill the process there, losing a pending save.
++     */
++    @JvmStatic
++    fun saveSettingsNow() {
++        try {
++            nativeSaveSettingsNow()
++        } catch (t: Throwable) {
++            // Native library not loaded yet (early pause): nothing to save.
++        }
++    }
++
+     /** Radar rectangle: screen pixels (x1, y1, x2, y2) and GTA 640x480 units. */
+     @JvmStatic
+     external fun nativeSetRadarRect(
+@@ -221,7 +241,11 @@ object ModernMenu {
      }
  
      internal fun exitGame() {
 -        (activity as? Samp)?.exitGame()
 +        // Save settings first: exitGame() ends the process right away.
++        // settings.ini now on this thread; gta_sa.set on the game thread.
++        saveSettingsNow()
 +        request(REQUEST_GFX_SAVE)
 +        activity.window.decorView.postDelayed({ (activity as? Samp)?.exitGame() }, 250L)
      }
  
      // ------------------------------------------------------------------ HUD
 diff --git a/java/com/holy/game/gui/modern/ModernPauseMenu.kt b/java/com/holy/game/gui/modern/ModernPauseMenu.kt
-index d26f6ac..8b1002c 100644
+index d26f6ac..0423dfc 100644
 --- a/java/com/holy/game/gui/modern/ModernPauseMenu.kt
 +++ b/java/com/holy/game/gui/modern/ModernPauseMenu.kt
 @@ -41,14 +41,19 @@ class ModernPauseMenu(private val activity: Activity) {
@@ -148,15 +189,16 @@ index d26f6ac..8b1002c 100644
          Row(label, desc)
  
      private class RowViews(
-@@ -94,6 +99,7 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -94,6 +99,8 @@ class ModernPauseMenu(private val activity: Activity) {
      private var settings: IntArray? = null
  
      private var exitArmedUntil = 0L
++    private var resetArmedUntil = 0L
 +    private var tappedValue = false
      private var hiding = false
      private val pendingActions = mutableListOf<() -> Unit>()
  
-@@ -213,7 +219,8 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -213,7 +220,8 @@ class ModernPauseMenu(private val activity: Activity) {
          val listLayout = LinearLayout(ctx).apply { orientation = LinearLayout.HORIZONTAL }
          listPage = listLayout
          rowsScroll = ScrollView(ctx).apply {
@@ -166,7 +208,7 @@ index d26f6ac..8b1002c 100644
              overScrollMode = View.OVER_SCROLL_NEVER
              isVerticalFadingEdgeEnabled = true
              setFadingEdgeLength(dpi(12f))
-@@ -250,11 +257,17 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -250,11 +258,17 @@ class ModernPauseMenu(private val activity: Activity) {
          sideTitle = ModernUi.text(ctx, "", 14f, Color.WHITE, "gilroy_bold", bold = true).apply { maxLines = 2 }
          sideInner.addView(sideTitle, LinearLayout.LayoutParams(match, wrap))
          sideBody = ModernUi.text(ctx, "", 12f, Color.argb(0xCC, 255, 255, 255)).apply {
@@ -186,7 +228,7 @@ index d26f6ac..8b1002c 100644
          listLayout.addView(side, LinearLayout.LayoutParams(0, wrap, 0.4f).apply { marginStart = dpi(8f) })
          frameLayout.addView(listLayout, LinearLayout.LayoutParams(match, 0, 1f).apply { topMargin = dpi(6f) })
  
-@@ -274,6 +287,24 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -274,6 +288,24 @@ class ModernPauseMenu(private val activity: Activity) {
          footer.addView(close, LinearLayout.LayoutParams(wrap, dpi(26f)))
          frameLayout.addView(footer, LinearLayout.LayoutParams(match, wrap).apply { topMargin = dpi(6f) })
          rootLayout.addView(frameLayout, FrameLayout.LayoutParams(match, match))
@@ -211,7 +253,7 @@ index d26f6ac..8b1002c 100644
  
          close.setOnClickListener { closeMenu() }
          locate.setOnClickListener { ModernMenu.request(ModernMenu.REQUEST_CENTER_PLAYER) }
-@@ -304,6 +335,7 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -304,6 +336,7 @@ class ModernPauseMenu(private val activity: Activity) {
  
          if (root.parent === parent) {
              // Already open: back from the native map, or it could not open.
@@ -219,7 +261,15 @@ index d26f6ac..8b1002c 100644
              root.alpha = 1f
              if (currentTab == TabId.MAP) selectTab(TabId.GAME, notifyNative = false)
              return
-@@ -449,29 +481,68 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -437,6 +470,7 @@ class ModernPauseMenu(private val activity: Activity) {
+         if (!map && (rebuild || previous != id || rows.isEmpty())) {
+             selectedRow = 0
+             exitArmedUntil = 0L
++            resetArmedUntil = 0L
+             buildRows()
+             rowsScroll.scrollTo(0, 0)
+         }
+@@ -449,29 +483,69 @@ class ModernPauseMenu(private val activity: Activity) {
          TabId.GAME -> gameRows()
          TabId.GRAPHICS -> settingRows(
              option(GtaSettings.VISUALS, "Kualitas visual",
@@ -281,7 +331,8 @@ index d26f6ac..8b1002c 100644
 +                "Rumput dan tanaman mengikuti kamera. Mati = FPS lebih tinggi.", ON_OFF),
 +            ActionRow("Simpan pengaturan grafis",
 +                "Simpan sekarang ke TESTLIT/SAMP/settings.ini (juga tersimpan otomatis).") { saveGraphics(it) },
-+            ActionRow("Reset grafis ke default", "Kembalikan grafis klien ke preset Sedang.") { resetGraphics() }
++            ActionRow("Reset grafis ke default",
++                "Kembalikan grafis klien ke preset Sedang. Ketuk dua kali untuk konfirmasi.") { resetGraphics(it) }
          )
          TabId.AUDIO -> settingRows(
              slider(GtaSettings.SFX_VOLUME, "Volume efek suara",
@@ -294,7 +345,7 @@ index d26f6ac..8b1002c 100644
          )
          TabId.CONTROLS -> listOf<Row>(editGtaControlsRow()) + settingRows(
              option(GtaSettings.TARGETING, "Mode bidik",
-@@ -515,8 +586,33 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -515,8 +589,51 @@ class ModernPauseMenu(private val activity: Activity) {
      private fun option(setting: Int, label: String, desc: String, options: List<String>): Row? =
          if (isAvailable(setting)) OptionRow(label, desc, setting, options) else null
  
@@ -314,9 +365,27 @@ index d26f6ac..8b1002c 100644
 +        root.postDelayed({ row.descOverride = null; refreshRow(row) }, 1500L)
 +    }
 +
-+    private fun resetGraphics() {
-+        ModernMenu.request(ModernMenu.REQUEST_GFX_RESET)
-+        refreshSettingsSoon()
++    // Two taps, like "Keluar": one stray tap must not wipe the player's graphics.
++    private fun resetGraphics(row: ActionRow) {
++        val now = System.currentTimeMillis()
++        if (now < resetArmedUntil) {
++            resetArmedUntil = 0L
++            ModernMenu.request(ModernMenu.REQUEST_GFX_RESET)
++            row.descOverride = "Grafis dikembalikan ke Sedang."
++            refreshRow(row)
++            root.postDelayed({ row.descOverride = null; refreshRow(row) }, 1500L)
++            refreshSettingsSoon()
++            return
++        }
++        resetArmedUntil = now + EXIT_CONFIRM_MS
++        row.descOverride = "Ketuk sekali lagi untuk reset grafis."
++        refreshRow(row)
++        root.postDelayed({
++            if (System.currentTimeMillis() >= resetArmedUntil && row.descOverride != null) {
++                row.descOverride = null
++                refreshRow(row)
++            }
++        }, EXIT_CONFIRM_MS)
 +    }
 +
 +    /** Preset/reset change many values natively: read them back after the game thread applied them. */
@@ -330,7 +399,7 @@ index d26f6ac..8b1002c 100644
  
      private fun settingRows(vararg rows: Row?): List<Row> {
          val list = rows.filterNotNull()
-@@ -538,20 +634,36 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -538,20 +655,36 @@ class ModernPauseMenu(private val activity: Activity) {
      private fun settingMin(setting: Int) = settings?.getOrNull(setting * 4 + 1) ?: 0
      private fun settingMax(setting: Int) = settings?.getOrNull(setting * 4 + 2) ?: 0
  
@@ -370,7 +439,7 @@ index d26f6ac..8b1002c 100644
              lp.bottomMargin = dp(2f).toInt()
              rowsLayout.addView(views.view, lp)
              rows.add(views)
-@@ -612,15 +724,20 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -612,15 +745,20 @@ class ModernPauseMenu(private val activity: Activity) {
          if (row is OptionRow) {
              left?.setOnClickListener { onRowTapped(views, -1, fromControl = true) }
              right?.setOnClickListener { onRowTapped(views, 1, fromControl = true) }
@@ -394,7 +463,7 @@ index d26f6ac..8b1002c 100644
          }
          return views
      }
-@@ -641,6 +758,7 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -641,6 +779,7 @@ class ModernPauseMenu(private val activity: Activity) {
  
      private fun handleRowTap(views: RowViews, direction: Int, fromControl: Boolean) {
          if (hiding) return
@@ -402,7 +471,7 @@ index d26f6ac..8b1002c 100644
          val alreadySelected = rows.indexOf(views) == selectedRow
          select(views)
          when (val row = views.row) {
-@@ -650,8 +768,16 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -650,8 +789,16 @@ class ModernPauseMenu(private val activity: Activity) {
                  val min = settingMin(row.setting)
                  val max = settingMax(row.setting)
                  var next = settingValue(row.setting) + direction
@@ -421,7 +490,7 @@ index d26f6ac..8b1002c 100644
                  setSettingValue(row.setting, next)
                  bindRow(views, true)
              }
-@@ -690,12 +816,18 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -690,12 +837,18 @@ class ModernPauseMenu(private val activity: Activity) {
                      val range = (settingMax(row.setting) - settingMin(row.setting)).coerceAtLeast(1)
                      "${(v - settingMin(row.setting)) * 100 / range}%"
                  } else {
@@ -442,7 +511,7 @@ index d26f6ac..8b1002c 100644
              }
          }
      }
-@@ -803,6 +935,7 @@ class ModernPauseMenu(private val activity: Activity) {
+@@ -803,6 +956,7 @@ class ModernPauseMenu(private val activity: Activity) {
          const val REPEAT_DELAY_MS = 350L
          const val REPEAT_INTERVAL_MS = 110L
          const val ROW_HEIGHT_DP = 36f
