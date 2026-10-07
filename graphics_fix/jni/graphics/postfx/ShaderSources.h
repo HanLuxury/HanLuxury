@@ -221,6 +221,17 @@ uniform vec4 uSunColor;     // rgb, w = sun glow strength
 uniform vec4 uWet;          // wetness, rain, puddle coverage, reflection boost
 uniform vec2 uDepthTexel;   // 1 / depth texture size
 uniform int uFXAA;          // 1 = FXAA on the world image (HUD is drawn later)
+uniform sampler2D uState;   // 1x1: auto exposure / 4, sqrt(focus / 1000 m), average luminance
+uniform sampler2D uDofTex;  // half-resolution blurred scene (depth of field)
+uniform sampler2D uLUT;     // colour lookup strip (size*size x size), display space
+uniform vec4 uHaze;         // density per metre, start metres, max opacity, height falloff
+uniform vec4 uHazeBase;     // base height, sun scattering, horizon colour share, uniform density
+uniform vec4 uAutoExposure; // strength, 0, 0, 0
+uniform vec4 uDof;          // strength, 0, 0, 0
+uniform vec4 uMotion;       // strength, max length (uv), near fade metres, enabled
+uniform mat4 uPrevViewProj; // world -> previous frame clip
+uniform vec4 uLut;          // strength, size, 0, enabled
+uniform vec4 uFinish;       // film grain, dither, grading strength, 0
 vec3 linearRGB(vec3 c) {
     return mix(c/12.92,pow(max((c+0.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(0.04045),c));
 }
@@ -360,6 +371,43 @@ vec3 skyGrade(vec3 c) {
     c+=uSunColor.rgb*(pow(mu,48.0)*0.55+pow(mu,6.0)*0.18)*uSunColor.w;
     return c;
 }
+// Camera motion blur by reprojection into the previous frame. Pixels close to
+// the camera (own car/character, which move WITH the camera) stay sharp.
+vec3 motionBlur(vec3 c,bool geometry,float distance) {
+    vec4 world=geometry ? uInvView*vec4(viewPosition(vUV),1.0) : vec4(worldDirection(vUV),0.0);
+    vec4 clip=uPrevViewProj*world;
+    if(clip.w<=1e-4) return c;
+    vec2 velocity=(vUV-(clip.xy/clip.w*0.5+0.5))*uMotion.x;
+    float len=length(velocity);
+    if(len>uMotion.y) velocity*=uMotion.y/len;
+    if(geometry) velocity*=smoothstep(uMotion.z,uMotion.z*2.5,distance);
+    if(length(velocity/uTexel)<1.0) return c;
+    vec3 sum=c;
+    for(int i=1;i<8;++i) sum+=scene(vUV-velocity*(float(i)/7.0));
+    return sum*0.125;
+}
+// Aerial haze: thicker near the ground, lit by the sun when looking into it.
+vec3 haze(vec3 c,float distance) {
+    vec3 p=viewPosition(vUV);
+    vec3 world=(uInvView*vec4(p,1.0)).xyz;
+    vec3 eye=uInvView[3].xyz;
+    float height=0.5*(world.z+eye.z)-uHazeBase.x;
+    float density=uHaze.x*exp(-max(height,0.0)*uHaze.w)+uHazeBase.w;
+    float amount=min(1.0-exp(-max(distance-uHaze.y,0.0)*density),uHaze.z);
+    float mu=max(dot(normalize(world-eye),uSunDirection.xyz),0.0);
+    vec3 colour=mix(uFog.rgb,uSkyHorizon.rgb,uHazeBase.z)
+        +uSunColor.rgb*(pow(mu,6.0)*0.45+pow(mu,28.0)*0.85)*uHazeBase.y*uSunDirection.w;
+    return mix(c,colour,amount);
+}
+vec3 applyLut(vec3 g) {
+    float n=uLut.y;
+    g=clamp(g,0.0,1.0);
+    float b=g.b*(n-1.0);float b0=floor(b);float b1=min(b0+1.0,n-1.0);
+    float x=g.r*(n-1.0)+0.5;float y=(g.g*(n-1.0)+0.5)/n;
+    vec3 l0=texture(uLUT,vec2((b0*n+x)/(n*n),y)).rgb;
+    vec3 l1=texture(uLUT,vec2((b1*n+x)/(n*n),y)).rgb;
+    return mix(g,mix(l0,l1,b-b0),uLut.x);
+}
 void main() {
     vec4 src=texture(uScene,vUV);
     vec3 c=uFXAA!=0 ? fxaaScene(vUV) : (uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb);
@@ -368,11 +416,21 @@ void main() {
     c=max(c+clamp((luma(c)-luma(local))*uDetail.x,-0.035,0.035),vec3(0));
     vec4 fx=effects();
     bool geometry=uHasDepth!=0 && abs(texture(uDepth,vUV).r-uClearDepth)>0.0000002;
+    float depthMetres=geometry ? viewDepth(vUV) : 1.0e5;
+    vec4 state=texture(uState,vec2(0.5));
+    if(uMotion.w>0.5) c=motionBlur(c,geometry,depthMetres);
+    if(uDof.x>0.0 && uHasDepth!=0) {
+        float focus=state.g*state.g*1000.0;
+        float start=focus*1.3+4.0;
+        float coc=uDof.x*smoothstep(start,start+max(focus*2.0,25.0),depthMetres);
+        c=mix(c,texture(uDofTex,vUV).rgb,coc);
+    }
     float reflection=geometry && uWet.x>0.01 ? wetSurface(c) : 1.0;
     c=c*fx.a+fx.rgb*reflection;
     if(geometry) {
-        float distance=max(viewDepth(vUV)-8.0,0.0);
+        float distance=max(depthMetres-8.0,0.0);
         c=mix(c,uFog.rgb,clamp(1.0-exp(-distance*uFog.a),0.0,0.78));
+        if(uHaze.x>0.0) c=haze(c,depthMetres);
     } else if(uHasDepth!=0 && uSkyZenith.w+uSkyHorizon.w+uSunColor.w>0.0) {
         c=skyGrade(c);
     }
@@ -387,8 +445,16 @@ void main() {
         float pulse=1.0+uLightColor[i].a*sin(uTime*0.6+float(i)*1.7);
         c+=uLightColor[i].rgb*(uLightPosition[i].w*glow*pulse);
     }
-    c=referenceGrade(c,uGrade,uDetail,uShadowTint,uHighlightTint,vUV);
-    outColor=vec4(uEncodeSRGB!=0 ? gammaRGB(c) : c,src.a);
+    c*=mix(1.0,state.r*4.0,uAutoExposure.x);
+    vec3 graded=referenceGrade(c,uGrade,uDetail,uShadowTint,uHighlightTint,vUV);
+    c=mix(min(c,vec3(1.0)),graded,uFinish.z);
+    // Display space for the LUT, grain and dither (sRGB surfaces encode later).
+    vec3 display=gammaRGB(c);
+    if(uLut.w>0.5) display=applyLut(display);
+    float noise=hash12(gl_FragCoord.xy+fract(uTime*7.31)*vec2(127.1,311.7));
+    display+=(noise-0.5)*(uFinish.y/255.0+uFinish.x*0.08*(1.0-luma(display)));
+    display=clamp(display,0.0,1.0);
+    outColor=vec4(uEncodeSRGB!=0 ? display : linearRGB(display),src.a);
 }
 )GLSL";
 inline constexpr char kAtmosphere[] = R"GLSL(#version 300 es
@@ -430,6 +496,7 @@ vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlight
 uniform sampler2D uScene;
 uniform vec2 uTexel;
 uniform vec4 uSun; // sun UV, shaft strength, flare strength.
+uniform vec2 uRays; // ray length (share of the way to the sun), decay per step
 uniform float uAspect;
 uniform int uDecodeSRGB;
 #ifdef FX_DEPTH
@@ -466,10 +533,10 @@ vec3 sunEffects(vec2 uv) {
     }
     light/=12.0;open/=12.0;
     float visibility=smoothstep(0.20,0.85,max(light.r,max(light.g,light.b)))*open;
-    vec2 delta=(uSun.xy-uv)*(0.88/24.0);
+    vec2 delta=(uSun.xy-uv)*(uRays.x/24.0);
     vec2 p=uv;vec3 rays=vec3(0);float decay=1.0;
     for(int i=0;i<24;++i) {
-        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=0.965;
+        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=uRays.y;
     }
     vec2 sunDelta=(uv-uSun.xy)*vec2(uAspect,1);
     float halo=exp(-dot(sunDelta,sunDelta)/0.025);
@@ -483,6 +550,94 @@ vec3 sunEffects(vec2 uv) {
 }
 
 void main() { outColor=vec4(sunEffects(vUV),1); }
+)GLSL";
+inline constexpr char kState[] = R"GLSL(#version 300 es
+precision highp float;
+precision highp sampler2D;
+in highp vec2 vUV;
+layout(location=0) out vec4 outColor;
+// One pixel of slowly changing frame state, ping-ponged between two 1x1
+// targets: r = auto exposure / 4, g = sqrt(focus distance / 1000 m),
+// b = average scene luminance. Read by the composite pass.
+uniform sampler2D uScene;
+uniform sampler2D uDepth;
+uniform sampler2D uSource;   // state of the previous frame
+uniform int uHasDepth;
+uniform int uDecodeSRGB;
+uniform float uClearDepth;
+uniform vec2 uDepthRange;
+uniform mat4 uInvProjection;
+uniform vec4 uAdapt;         // key, min, max, blend (1 = reset)
+uniform vec4 uFocus;         // blend (1 = reset), fallback focus metres
+vec3 linearRGB(vec3 c) {
+    return mix(c/12.92,pow(max((c+0.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(0.04045),c));
+}
+vec3 gammaRGB(vec3 c) {
+    c=max(c,vec3(0));
+    return mix(c*12.92,1.055*pow(c,vec3(1.0/2.4))-0.055,step(vec3(0.0031308),c));
+}
+float luma(vec3 c) { return dot(c,vec3(0.2126,0.7152,0.0722)); }
+vec3 filmic(vec3 x) {
+    return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0.0,1.0);
+}
+vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlightTint,vec2 uv) {
+    float lum=luma(c);
+    float chroma=max(c.r,max(c.g,c.b))-min(c.r,min(c.g,c.b));
+    // Protect saturated lamp/neon colors from the blue night shadow tint.
+    float shadow=(1.0-smoothstep(0.035,0.35,lum))*(1.0-clamp(chroma*3.0,0.0,1.0));
+    c*=mix(vec3(1),shadowTint,shadow)*mix(vec3(1),highlightTint,smoothstep(0.12,0.8,lum));
+    c*=grade.x;
+    c=mix(c,filmic(c),grade.w);
+    c=mix(vec3(luma(c)),c,grade.y+detail.y*(1.0-clamp(chroma*2.0,0.0,1.0)));
+    // Preserve black and avoid the hard clipping of an affine contrast curve.
+    c=0.18*pow(max(c/0.18,vec3(0)),vec3(grade.z));
+    float toe=luma(c);
+    c+=detail.z*smoothstep(0.0,0.02,toe)*(1.0-smoothstep(0.03,0.20,toe));
+    vec2 q=uv*2.0-1.0;
+    c*=1.0-detail.w*smoothstep(0.2,1.6,dot(q,q));
+    return max(c,vec3(0));
+}
+
+float viewDepthAt(vec2 uv,out bool sky) {
+    float raw=texture(uDepth,uv).r;
+    sky=abs(raw-uClearDepth)<0.0000002;
+    float z=(raw-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
+    vec4 p=uInvProjection*vec4(uv*2.0-1.0,z,1.0);
+    return abs(p.z/max(abs(p.w),1e-7));
+}
+void main() {
+    // Log-average luminance of an 8x8 grid, centre weighted (HUD-free world).
+    float logSum=0.0,weightSum=0.0;
+    for(int y=0;y<8;++y) for(int x=0;x<8;++x) {
+        vec2 g=(vec2(float(x),float(y))+0.5)/8.0;
+        vec2 uv=mix(vec2(0.08),vec2(0.92),g);
+        vec3 c=texture(uScene,uv).rgb;
+        if(uDecodeSRGB!=0) c=linearRGB(c);
+        vec2 q=uv*2.0-1.0;
+        float w=1.0-0.6*clamp(dot(q,q),0.0,1.0);
+        logSum+=log(max(luma(c),1e-4))*w;weightSum+=w;
+    }
+    float average=exp(logSum/max(weightSum,1e-4));
+    float exposure=clamp(uAdapt.x/max(average,1e-4),uAdapt.y,uAdapt.z);
+
+    float focus=uFocus.y;
+    if(uHasDepth!=0) {
+        float sum=0.0,count=0.0;
+        for(int i=0;i<5;++i) {
+            float a=float(i)*1.2566371;
+            vec2 uv=vec2(0.5)+(i==0 ? vec2(0.0) : vec2(cos(a),sin(a))*0.035);
+            bool sky;float d=viewDepthAt(uv,sky);
+            if(!sky) { sum+=d;count+=1.0; }
+        }
+        focus=count>0.0 ? sum/count : 400.0;
+    }
+    vec4 previous=texture(uSource,vec2(0.5));
+    float oldExposure=previous.r*4.0;
+    float oldFocus=previous.g*previous.g*1000.0;
+    float e=mix(oldExposure,exposure,clamp(uAdapt.w,0.0,1.0));
+    float f=mix(oldFocus,focus,clamp(uFocus.x,0.0,1.0));
+    outColor=vec4(clamp(e*0.25,0.0,1.0),sqrt(clamp(f/1000.0,0.0,1.0)),clamp(average,0.0,1.0),1.0);
+}
 )GLSL";
 inline constexpr char kCompatVertex[] = R"GLSL(#version 100
 attribute vec2 aPosition;
@@ -632,6 +787,7 @@ vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlight
 uniform sampler2D uScene;
 uniform vec2 uTexel;
 uniform vec4 uSun; // sun UV, shaft strength, flare strength.
+uniform vec2 uRays; // ray length (share of the way to the sun), decay per step
 uniform float uAspect;
 uniform int uDecodeSRGB;
 #ifdef FX_DEPTH
@@ -668,10 +824,10 @@ vec3 sunEffects(vec2 uv) {
     }
     light/=12.0;open/=12.0;
     float visibility=smoothstep(0.20,0.85,max(light.r,max(light.g,light.b)))*open;
-    vec2 delta=(uSun.xy-uv)*(0.88/24.0);
+    vec2 delta=(uSun.xy-uv)*(uRays.x/24.0);
     vec2 p=uv;vec3 rays=vec3(0);float decay=1.0;
     for(int i=0;i<24;++i) {
-        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=0.965;
+        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=uRays.y;
     }
     vec2 sunDelta=(uv-uSun.xy)*vec2(uAspect,1);
     float halo=exp(-dot(sunDelta,sunDelta)/0.025);

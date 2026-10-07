@@ -33,6 +33,7 @@
 #include "game/Shadow/Shadows.h"
 #include "net/netgame.h"   // CObjectPool::ProcessMaterialText()
 #include "graphics/sun/WorldSunShadow.h"
+#include "graphics/postfx/EglPostFX.h"
 #include "graphics/RenderThread.h"
 #include "game/TimeCycle.h"
 #include "game/Clock.h"
@@ -55,13 +56,25 @@ static WorldSunShadow::Frame GetSunShadowFrame()
     const float hour=float(CClock::GetGameClockHours())+float(CClock::GetGameClockMinutes())/60.0f;
     auto unit=[](float value) {return std::isfinite(value) ? std::clamp(value,0.0f,1.0f):0.0f;};
     const float daylight=unit((hour-5.0f)/1.25f)*unit((20.0f-hour)/1.5f)*unit((sun.z-0.01f)/0.18f);
-    frame.sunlight=daylight*(1-unit(CWeather::Rain))*(1-0.8f*unit(CWeather::CloudCoverage))
+    // CWeather::Update (0x6f11a4..0x6f11dc, 0x6f1a68) sets CloudCoverage=1 for
+    // every weather outside {0,1,2,3,5,6,10,11,13,14,17,18} and every id >= 19,
+    // and SA-MP's SetWeather makes it jump there in one frame. Before, that
+    // cut the sun shadows to 20% at once in most weathers ("graphics gone").
+    // Clouds now only soften the sun; with "Grafis ikut cuaca" off they do not
+    // count at all. Heavy rain still hides the sun. Eased (~1 s), no popping.
+    const bool followWeather=EglPostFX::GetSettings().weatherLook;
+    const float cloud=followWeather ? unit(CWeather::CloudCoverage) : 0.0f;
+    const float target=daylight*(1-0.75f*unit(CWeather::Rain))*(1-0.35f*cloud)
         *(1-unit(CWeather::UnderWaterness))*(1-unit(CWeather::InTunnelness));
+    static float eased=-1.0f;
+    eased=eased<0.0f ? target : eased+(target-eased)*0.06f;
+    frame.sunlight=eased;
     frame.focus[0]=position.x+front.x*22.0f;
     frame.focus[1]=position.y+front.y*22.0f;
     frame.focus[2]=position.z+front.z*22.0f;
     frame.toSun[0]=sun.x;frame.toSun[1]=sun.y;frame.toSun[2]=sun.z;
-    frame.valid=frame.sunlight>0.0f;
+    // Too faint to see: skip the whole caster replay.
+    frame.valid=frame.sunlight>0.02f;
     return frame;
 }
 

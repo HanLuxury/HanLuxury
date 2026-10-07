@@ -37,6 +37,17 @@ uniform vec4 uSunColor;     // rgb, w = sun glow strength
 uniform vec4 uWet;          // wetness, rain, puddle coverage, reflection boost
 uniform vec2 uDepthTexel;   // 1 / depth texture size
 uniform int uFXAA;          // 1 = FXAA on the world image (HUD is drawn later)
+uniform sampler2D uState;   // 1x1: auto exposure / 4, sqrt(focus / 1000 m), average luminance
+uniform sampler2D uDofTex;  // half-resolution blurred scene (depth of field)
+uniform sampler2D uLUT;     // colour lookup strip (size*size x size), display space
+uniform vec4 uHaze;         // density per metre, start metres, max opacity, height falloff
+uniform vec4 uHazeBase;     // base height, sun scattering, horizon colour share, uniform density
+uniform vec4 uAutoExposure; // strength, 0, 0, 0
+uniform vec4 uDof;          // strength, 0, 0, 0
+uniform vec4 uMotion;       // strength, max length (uv), near fade metres, enabled
+uniform mat4 uPrevViewProj; // world -> previous frame clip
+uniform vec4 uLut;          // strength, size, 0, enabled
+uniform vec4 uFinish;       // film grain, dither, grading strength, 0
 #include "reference_color.glsl"
 float viewDepth(vec2 uv) {
     float z=(texture(uDepth,uv).r-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
@@ -148,6 +159,43 @@ vec3 skyGrade(vec3 c) {
     c+=uSunColor.rgb*(pow(mu,48.0)*0.55+pow(mu,6.0)*0.18)*uSunColor.w;
     return c;
 }
+// Camera motion blur by reprojection into the previous frame. Pixels close to
+// the camera (own car/character, which move WITH the camera) stay sharp.
+vec3 motionBlur(vec3 c,bool geometry,float distance) {
+    vec4 world=geometry ? uInvView*vec4(viewPosition(vUV),1.0) : vec4(worldDirection(vUV),0.0);
+    vec4 clip=uPrevViewProj*world;
+    if(clip.w<=1e-4) return c;
+    vec2 velocity=(vUV-(clip.xy/clip.w*0.5+0.5))*uMotion.x;
+    float len=length(velocity);
+    if(len>uMotion.y) velocity*=uMotion.y/len;
+    if(geometry) velocity*=smoothstep(uMotion.z,uMotion.z*2.5,distance);
+    if(length(velocity/uTexel)<1.0) return c;
+    vec3 sum=c;
+    for(int i=1;i<8;++i) sum+=scene(vUV-velocity*(float(i)/7.0));
+    return sum*0.125;
+}
+// Aerial haze: thicker near the ground, lit by the sun when looking into it.
+vec3 haze(vec3 c,float distance) {
+    vec3 p=viewPosition(vUV);
+    vec3 world=(uInvView*vec4(p,1.0)).xyz;
+    vec3 eye=uInvView[3].xyz;
+    float height=0.5*(world.z+eye.z)-uHazeBase.x;
+    float density=uHaze.x*exp(-max(height,0.0)*uHaze.w)+uHazeBase.w;
+    float amount=min(1.0-exp(-max(distance-uHaze.y,0.0)*density),uHaze.z);
+    float mu=max(dot(normalize(world-eye),uSunDirection.xyz),0.0);
+    vec3 colour=mix(uFog.rgb,uSkyHorizon.rgb,uHazeBase.z)
+        +uSunColor.rgb*(pow(mu,6.0)*0.45+pow(mu,28.0)*0.85)*uHazeBase.y*uSunDirection.w;
+    return mix(c,colour,amount);
+}
+vec3 applyLut(vec3 g) {
+    float n=uLut.y;
+    g=clamp(g,0.0,1.0);
+    float b=g.b*(n-1.0);float b0=floor(b);float b1=min(b0+1.0,n-1.0);
+    float x=g.r*(n-1.0)+0.5;float y=(g.g*(n-1.0)+0.5)/n;
+    vec3 l0=texture(uLUT,vec2((b0*n+x)/(n*n),y)).rgb;
+    vec3 l1=texture(uLUT,vec2((b1*n+x)/(n*n),y)).rgb;
+    return mix(g,mix(l0,l1,b-b0),uLut.x);
+}
 void main() {
     vec4 src=texture(uScene,vUV);
     vec3 c=uFXAA!=0 ? fxaaScene(vUV) : (uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb);
@@ -156,11 +204,21 @@ void main() {
     c=max(c+clamp((luma(c)-luma(local))*uDetail.x,-0.035,0.035),vec3(0));
     vec4 fx=effects();
     bool geometry=uHasDepth!=0 && abs(texture(uDepth,vUV).r-uClearDepth)>0.0000002;
+    float depthMetres=geometry ? viewDepth(vUV) : 1.0e5;
+    vec4 state=texture(uState,vec2(0.5));
+    if(uMotion.w>0.5) c=motionBlur(c,geometry,depthMetres);
+    if(uDof.x>0.0 && uHasDepth!=0) {
+        float focus=state.g*state.g*1000.0;
+        float start=focus*1.3+4.0;
+        float coc=uDof.x*smoothstep(start,start+max(focus*2.0,25.0),depthMetres);
+        c=mix(c,texture(uDofTex,vUV).rgb,coc);
+    }
     float reflection=geometry && uWet.x>0.01 ? wetSurface(c) : 1.0;
     c=c*fx.a+fx.rgb*reflection;
     if(geometry) {
-        float distance=max(viewDepth(vUV)-8.0,0.0);
+        float distance=max(depthMetres-8.0,0.0);
         c=mix(c,uFog.rgb,clamp(1.0-exp(-distance*uFog.a),0.0,0.78));
+        if(uHaze.x>0.0) c=haze(c,depthMetres);
     } else if(uHasDepth!=0 && uSkyZenith.w+uSkyHorizon.w+uSunColor.w>0.0) {
         c=skyGrade(c);
     }
@@ -175,6 +233,14 @@ void main() {
         float pulse=1.0+uLightColor[i].a*sin(uTime*0.6+float(i)*1.7);
         c+=uLightColor[i].rgb*(uLightPosition[i].w*glow*pulse);
     }
-    c=referenceGrade(c,uGrade,uDetail,uShadowTint,uHighlightTint,vUV);
-    outColor=vec4(uEncodeSRGB!=0 ? gammaRGB(c) : c,src.a);
+    c*=mix(1.0,state.r*4.0,uAutoExposure.x);
+    vec3 graded=referenceGrade(c,uGrade,uDetail,uShadowTint,uHighlightTint,vUV);
+    c=mix(min(c,vec3(1.0)),graded,uFinish.z);
+    // Display space for the LUT, grain and dither (sRGB surfaces encode later).
+    vec3 display=gammaRGB(c);
+    if(uLut.w>0.5) display=applyLut(display);
+    float noise=hash12(gl_FragCoord.xy+fract(uTime*7.31)*vec2(127.1,311.7));
+    display+=(noise-0.5)*(uFinish.y/255.0+uFinish.x*0.08*(1.0-luma(display)));
+    display=clamp(display,0.0,1.0);
+    outColor=vec4(uEncodeSRGB!=0 ? display : linearRGB(display),src.a);
 }

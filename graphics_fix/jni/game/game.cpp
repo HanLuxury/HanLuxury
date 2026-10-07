@@ -24,6 +24,7 @@
 #include "game/Widgets/TouchInterface.h"
 #include "GrassRenderer.h"
 #include "Weather.h"
+#include "Enums/eWeatherType.h"
 #include "Clock.h"
 #include "CPlayerInfoGta.h"
 #include "WaterLevel.h"
@@ -315,9 +316,16 @@ void CGame::SetWorldTime(int iHour, int iMinute) {
 }
 
 void CGame::SetWorldWeather(unsigned char byteWeatherID) {
-    CWeather::ForcedWeatherType = byteWeatherID;
-    CWeather::OldWeatherType = byteWeatherID;
-    CWeather::NewWeatherType = byteWeatherID;
+    // SA-MP allows 0..255, libGTASA never range-checks: CWeather::Update copies
+    // Forced into New (0x6f0e94..0x6f0e9c) and CColourSet::CColourSet (0x501e6c)
+    // reads table[hour*23 + weather] from the [8][23] timecycle tables, which
+    // CTimeCycle::InjectHooks redirected to the client's own arrays. Ids >= 23
+    // read unrelated client memory (fog/far clip/colours garbage: "graphics
+    // gone"). Keep a valid column; m_byteWeather keeps the server value.
+    const auto weather = static_cast<int16>(byteWeatherID % NUM_WEATHERS);
+    CWeather::ForcedWeatherType = weather;
+    CWeather::OldWeatherType = weather;
+    CWeather::NewWeatherType = weather;
 }
 
 void CGame::ToggleThePassingOfTime(bool bOnOff)

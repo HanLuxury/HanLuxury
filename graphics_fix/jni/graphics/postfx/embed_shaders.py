@@ -14,6 +14,7 @@ TABLE = [
     ("kDepthEffects", "depth_effects.frag"),
     ("kComposite", "composite.frag"),
     ("kAtmosphere", "atmosphere.frag"),
+    ("kState", "state.frag"),
     ("kCompatVertex", "compat_fullscreen.vert"),
     ("kCompatBloom", "compat_bloom.frag"),
     ("kCompatComposite", "compat_composite.frag"),

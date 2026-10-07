@@ -49,4 +49,9 @@ object GtaSettings {
     const val GFX_FOG = GFX_BASE + 13
     const val GFX_GRASS = GFX_BASE + 14
     const val GFX_FXAA = GFX_BASE + 15
+    const val GFX_MSAA = GFX_BASE + 16
+    const val GFX_MOTION_BLUR = GFX_BASE + 17
+    const val GFX_DOF = GFX_BASE + 18
+    const val GFX_ANISOTROPIC = GFX_BASE + 19
+    const val GFX_ADAPTIVE = GFX_BASE + 20
 }

@@ -737,7 +737,7 @@ Java_com_holy_game_gui_modern_ModernMenu_nativeGetSettings(JNIEnv* env, jclass c
         data[base + 0] = GraphicsSettings::Get(i);
         data[base + 1] = GraphicsSettings::Min(i);
         data[base + 2] = GraphicsSettings::Max(i);
-        data[base + 3] = 1;
+        data[base + 3] = GraphicsSettings::Visible(i) ? 1 : 0;
     }
     jintArray array = env->NewIntArray(kCount * 4);
     if (array) env->SetIntArrayRegion(array, 0, kCount * 4, data);

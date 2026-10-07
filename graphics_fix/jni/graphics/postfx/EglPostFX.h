@@ -58,6 +58,25 @@ struct Settings {
     float fogStrength = 0.65f; // GLES3 + valid depth/projection only.
     float skyStrength = 0.35f; // Langit realtime: warna & glow matahari dari jam + cuaca.
     float wetStrength = 1.0f;  // Jalan basah/genangan saat hujan (CWeather::WetRoads).
+    float motionBlur = 0.0f;   // Motion blur kamera (reproyeksi depth), 0..1. 0 = pass dilewati.
+    float dofStrength = 0.0f;  // Depth of field (latar jauh buram), 0..1. 0 = pass dilewati.
+    // Tampilan sinematik. Nilai bawaan = foto referensi; bisa ditimpa oleh
+    // TESTLIT/graphics/ZyZGfx.ini (GraphicsSettings::LoadTuning).
+    float autoExposure = 0.25f; // Adaptasi mata 0..1 (0 = mati).
+    float aeKey = 0.11f, aeMin = 0.5f, aeMax = 2.5f, aeSpeed = 1.5f;
+    float hazeDensity = 0.0010f;  // Kabut tinggi (per meter, makin tipis ke atas).
+    float hazeUniform = 0.0005f;  // Kabut rata (per meter).
+    float hazeStart = 40.0f, hazeMax = 0.85f, hazeFalloff = 0.045f, hazeBaseHeight = 0.0f;
+    float hazeSun = 1.0f;         // Cahaya matahari di dalam kabut (silau ke arah matahari).
+    float hazeFoggy = 3.0f;       // Pengali kabut saat cuaca berkabut/hujan.
+    float rayLength = 0.88f, rayDecay = 0.965f;
+    float grain = 0.0f, dither = 1.0f, gradeStrength = 1.0f;
+    float lutStrength = 1.0f;
+    char lutPath[192] = {};       // Kosong = tanpa LUT.
+    float wetReflection = 1.0f, wetPuddles = 1.0f, wetRipples = 1.0f, wetForce = 0.0f;
+    float nightThreshold = 0.52f; // Ambang bloom malam relatif ke siang.
+    float nightGlow = 1.0f;       // Pengali bloom malam.
+    bool lowMemory = false;       // HP RAM kecil: target 8-bit, tanpa buffer tambahan.
     int lightCount = 0; // No fixed glowing spot pasted over the game by default.
     std::array<ScreenLight, 4> lights{};
 };

@@ -3,6 +3,9 @@
 #include "SunShadowShaders.h"
 #include "../RenderThread.h"
 #include "../../modloader/HookScope.h"
+#include "../GraphicsSettings.h"
+#include "../TextureFilter.h"
+#include "../WorldMsaa.h"
 #include <GLES3/gl3.h>
 #include <android/log.h>
 #include <dlfcn.h>
@@ -585,6 +588,14 @@ struct WorldEndSlot {std::atomic<bool> busy{false};Frame next;};
 WorldEndSlot worldEndSlots[8];
 std::atomic<unsigned> worldEndCursor{0};
 void RunWorldEnd(void* argument) {
+    // Once, on GTA's render thread with its context: what the GPU can do.
+    static bool deviceChecked=false;
+    if(!deviceChecked && eglGetCurrentContext()!=EGL_NO_CONTEXT) {
+        deviceChecked=true;
+        GraphicsSettings::SetGpu(reinterpret_cast<const char*>(glGetString(GL_RENDERER)));
+        TextureFilter::CheckDevice();
+        WorldMsaa::CheckDevice();
+    }
     auto* slot=static_cast<WorldEndSlot*>(argument);
     const Frame next=slot->next;
     slot->busy.store(false,std::memory_order_release);
@@ -652,6 +663,10 @@ static void BeginWorldImpl(const Frame& frame) {
         s->resolutionCap=s->maxTexture>=512 ? std::min(4096,s->maxTexture):4096;
     }
     config.resolution=std::min(config.resolution,s->resolutionCap);
+    // Adaptive quality (low FPS): fewer casters, smaller map, then no sun shadow.
+    const int adaptive=GraphicsSettings::AdaptiveLevel();
+    if(adaptive>=2) { config.maxDraws=config.maxDraws*3/5;config.resolution=std::min(config.resolution,1024); }
+    if(adaptive>=3) config.enabled=false;
     // Resource setup changes program/vertex bindings. Do not enter it inside
     // transform feedback or a query, even for the first automatic world draw.
     if(UnsafeQueryState(s->caps)) return;

@@ -15,7 +15,7 @@ inline WeatherTraits TraitsFor(int type) {
         case 1: case 5: case 10: case 14: case 18: t.clear=0.8f;break;            // SUNNY_*
         case 2: t.clear=0.85f;t.smog=1.0f;break;                                   // EXTRASUNNY_SMOG_LA
         case 3: t.clear=0.6f;t.smog=1.0f;break;                                    // SUNNY_SMOG_LA
-        case 4: case 7: case 12: case 15: t.clear=0.15f;t.overcast=1.0f;break;     // CLOUDY_*
+        case 4: case 7: case 12: case 15: t.clear=0.35f;t.overcast=1.0f;break;     // CLOUDY_*
         case 8: case 16: t.clear=0.0f;t.overcast=1.0f;t.rain=1.0f;break;           // RAINY_*
         case 9: t.clear=0.1f;t.overcast=0.6f;t.fog=1.0f;break;                     // FOGGY_SF
         case 19: t.clear=0.2f;t.sand=1.0f;break;                                   // SANDSTORM_DESERT
@@ -44,6 +44,8 @@ struct LookProfile {
     float sunColor[4]{};     // rgb glow colour, w = glow strength
     float sunDirection[4]{0,0,1,0}; // world direction to the sun, w = visibility
     float wet[4]{};          // wetness, rain, puddle coverage, reflection boost
+    float haze[4]{};         // density, start metres, max opacity, height falloff
+    float hazeBase[4]{};     // base height, sun scattering, horizon colour share, uniform density
 };
 inline float Unit(float x) { return std::isfinite(x) ? std::clamp(x,0.0f,1.0f) : 0.0f; }
 inline float Smooth(float a,float b,float x) {
@@ -83,8 +85,11 @@ inline LookProfile BuildLook(const Settings& settings,const FrameEnvironment& in
     if(e.valid) {
         day=Smooth(5.0f,7.25f,e.hour)*(1-Smooth(18.0f,20.0f,e.hour));night=1-day;
         golden=std::max(1-std::abs(e.hour-6.5f)/1.6f,1-std::abs(e.hour-18.0f)/1.7f);
-        golden=Unit(golden)*(1-e.cloud)*(1-e.rain)*(1-0.7f*w.overcast);
-        rain=Unit(e.rain*0.8f+e.fog*0.4f+e.cloud*0.12f);
+        // Gated like the traits: with "Grafis ikut cuaca" off, clouds do not
+        // remove the golden hour.
+        const float cloud=settings.weatherLook ? e.cloud : 0.0f;
+        golden=Unit(golden)*(1-0.6f*cloud)*(1-e.rain)*(1-0.5f*w.overcast);
+        rain=Unit(e.rain*0.8f+e.fog*0.4f+cloud*0.12f);
         wet=std::max(e.wetness,e.rain*0.6f);
     }
     switch(settings.preset) {
@@ -98,8 +103,8 @@ inline LookProfile BuildLook(const Settings& settings,const FrameEnvironment& in
     c.exposure*=1+night*0.10f+golden*0.04f-rain*0.08f-w.overcast*0.03f*day;
     c.saturation*=1-rain*0.18f-night*0.04f-w.overcast*0.08f-w.fog*0.12f-w.sand*0.10f-w.smog*0.06f;
     c.contrast*=1-rain*0.04f-w.fog*0.08f-w.sand*0.06f-w.overcast*0.04f;
-    c.bloomStrength*=1+golden*0.75f+night*0.65f+w.clear*day*0.20f;
-    c.bloomThreshold*=1-night*0.48f-golden*0.18f;
+    c.bloomStrength*=1+golden*0.75f+night*0.65f*c.nightGlow+w.clear*day*0.20f;
+    c.bloomThreshold*=1-night*(1-c.nightThreshold)-golden*0.18f;
     c.vibrance+=0.05f*w.clear*day;
     c.ssrStrength*=0.22f+0.78f*std::max(wet,rain);
     p.shadow[0]=1-0.19f*night-0.055f*rain;
@@ -151,11 +156,20 @@ inline LookProfile BuildLook(const Settings& settings,const FrameEnvironment& in
     p.sunDirection[0]=e.toSun[0];p.sunDirection[1]=e.toSun[1];p.sunDirection[2]=e.toSun[2];
     p.sunDirection[3]=visibility;
 
-    const float wetness=Unit(wet*c.wetStrength)*(1-e.underwater);
+    const float wetness=Unit(std::max(wet,c.wetForce)*c.wetStrength)*(1-e.underwater);
     p.wet[0]=wetness;
-    p.wet[1]=Unit(e.rain)*c.wetStrength*(1-e.tunnel);
-    p.wet[2]=0.25f+0.45f*wetness;
-    p.wet[3]=2.5f;
+    p.wet[1]=Unit(e.rain)*c.wetStrength*c.wetRipples*(1-e.tunnel);
+    p.wet[2]=Unit((0.25f+0.45f*wetness)*c.wetPuddles);
+    p.wet[3]=2.5f*c.wetReflection;
+
+    // Aerial haze (photo look): sunlit near the sun, thicker in fog and rain.
+    const float foggy=1+(c.hazeFoggy-1)*Unit(std::max(std::max(w.fog,e.fog),std::max(rain*0.6f,w.sand*0.8f)));
+    const float open=(1-e.underwater)*(1-e.tunnel)*c.fogStrength*foggy;
+    p.haze[0]=c.hazeDensity*open;p.haze[1]=c.hazeStart;p.haze[2]=c.hazeMax;p.haze[3]=c.hazeFalloff;
+    p.hazeBase[0]=c.hazeBaseHeight;
+    p.hazeBase[1]=c.hazeSun*(0.6f+0.8f*golden)*(1-night);
+    p.hazeBase[2]=settings.weatherLook ? 0.75f : 0.4f;
+    p.hazeBase[3]=c.hazeUniform*open;
     return p;
 }
 } // namespace EglPostFX

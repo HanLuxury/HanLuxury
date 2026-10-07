@@ -4,7 +4,11 @@
 #include "ShaderSources.h"
 #include "../sun/WorldSunShadow.h"
 #include "../RenderThread.h"
+#include "../GraphicsSettings.h"
+#include "../TextureFilter.h"
+#include "../WorldMsaa.h"
 #include "../../modloader/HookScope.h"
+#include "../../vendor/imgui/stb_image.h" // implementation compiled in main.cpp
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl3.h>
@@ -26,7 +30,7 @@
 #define FX_LOG(...) __android_log_print(ANDROID_LOG_INFO,"EglPostFX",__VA_ARGS__)
 namespace EglPostFX {
 namespace {
-constexpr unsigned kUnits=8;
+constexpr unsigned kUnits=12;
 constexpr GLenum kSRGBWrite=0x8DB9; // GL_FRAMEBUFFER_SRGB_EXT.
 using SwapFn=EGLBoolean(EGLAPIENTRY*)(EGLDisplay,EGLSurface);
 using DamageFn=EGLBoolean(EGLAPIENTRY*)(EGLDisplay,EGLSurface,const EGLint*,EGLint);
@@ -180,7 +184,8 @@ enum Uniform { Source,Texel,Decode,Extract,ThresholdKnee,Direction,Scene,Depth,
     AOParams,Bloom0,Bloom1,Bloom2,Effects,Dirt,HasDepth,Encode,Grade,BloomDirt,
     EffectSize,LightCount,LightPosition,LightColor,Time,Aspect,Detail,ShadowTint,
     HighlightTint,Fog,Sun,Atmosphere,InvView,SunDirection,SkyZenith,SkyHorizon,SunColor,
-    Wet,DepthTexel,FXAA,UniformCount };
+    Wet,DepthTexel,FXAA,State,DofTex,LUT,Haze,HazeBase,AutoExposure,Dof,Motion,
+    PrevViewProj,Lut,Finish,Rays,Adapt,Focus,UniformCount };
 constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract",
     "uThresholdKnee","uDirection","uScene","uDepth","uProjection","uInvProjection",
     "uDepthRange","uClearDepth","uForwardSign","uSSR","uAO","uSSRParams","uAOParams",
@@ -188,7 +193,9 @@ constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract
     "uGrade","uBloomDirt","uEffectSize","uLightCount","uLightPosition[0]",
     "uLightColor[0]","uTime","uAspect","uDetail","uShadowTint","uHighlightTint",
     "uFog","uSun","uAtmosphere","uInvView","uSunDirection","uSkyZenith","uSkyHorizon",
-    "uSunColor","uWet","uDepthTexel","uFXAA"};
+    "uSunColor","uWet","uDepthTexel","uFXAA","uState","uDofTex","uLUT","uHaze",
+    "uHazeBase","uAutoExposure","uDof","uMotion","uPrevViewProj","uLut","uFinish","uRays",
+    "uAdapt","uFocus"};
 static_assert(sizeof(uniformNames)/sizeof(uniformNames[0])==UniformCount);
 struct Program {
     GLuint id=0;GLint location[UniformCount]{};
@@ -276,18 +283,28 @@ struct ContextState {
     GLuint vao=0,dirt=0,depthTexture=0;
     int width=0,height=0;GLenum colorFormat=0,depthFormat=0;
     Target scene,bloom[3],ping[3],effects,atmosphere;
-    Program downsample,blur,depthEffects,composite,atmosphereProgram;
+    Target state[2],dof;          // 1x1 frame state (exposure, focus), half-res DOF source
+    Program downsample,blur,depthEffects,composite,atmosphereProgram,stateProgram;
+    int stateIndex=0;bool stateValid=false,lowMemoryTargets=false;
+    std::chrono::steady_clock::time_point stateTime{};
+    GLuint lut=0;int lutSize=0;char lutLoaded[192]{};bool lutTried=false;
+    // Motion blur: previous frame camera (world -> clip) and eye/forward for cut detection.
+    float prevViewProj[16]{},prevEye[3]{},prevForward[3]{};bool havePrev=false,motionActive=false;
+    float motionPrev[16]{};
     float projection[16]{},inverse[16]{},depthRange[2]{0,1},clearDepth=1,forwardSign=-1;
     void DestroyTargets() {
         // Scene FBO owns an attachment reference: delete it before the depth texture.
         scene.Destroy();for(auto& x:bloom) x.Destroy();for(auto& x:ping) x.Destroy();effects.Destroy();
-        atmosphere.Destroy();
+        atmosphere.Destroy();state[0].Destroy();state[1].Destroy();dof.Destroy();
+        stateValid=false;havePrev=false;
         if(depthTexture) glDeleteTextures(1,&depthTexture);
         depthTexture=0;depthFormat=0;width=height=0;
     }
     void Destroy() {
         DestroyTargets();downsample.Destroy();blur.Destroy();depthEffects.Destroy();composite.Destroy();
-        atmosphereProgram.Destroy();compat.Destroy();
+        atmosphereProgram.Destroy();stateProgram.Destroy();compat.Destroy();
+        if(lut) glDeleteTextures(1,&lut);
+        lut=0;lutSize=0;lutLoaded[0]=0;lutTried=false;
         if(vao) glDeleteVertexArrays(1,&vao);if(dirt) glDeleteTextures(1,&dirt);
         vao=dirt=0;ready=false;processedBeforeHud=false;
     }
@@ -296,7 +313,7 @@ struct ContextState {
         if(!vs) return false;
         const bool ok=Link(downsample,vs,Shaders::kDownsample) && Link(blur,vs,Shaders::kBlur)
             && Link(depthEffects,vs,Shaders::kDepthEffects) && Link(composite,vs,Shaders::kComposite)
-            && Link(atmosphereProgram,vs,Shaders::kAtmosphere);
+            && Link(atmosphereProgram,vs,Shaders::kAtmosphere) && Link(stateProgram,vs,Shaders::kState);
         glDeleteShader(vs);
         if(!ok) return false;
         glGenVertexArrays(1,&vao);
@@ -322,10 +339,11 @@ struct ContextState {
         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
         ready=true;return vao!=0 && dirt!=0;
     }
-    bool Targets(int w,int h,GLenum color) {
-        if(width==w && height==h && colorFormat==color && scene.fbo) return true;
-        DestroyTargets();width=w;height=h;colorFormat=color;
-        const GLenum working=caps.halfFloat ? GL_RGBA16F : GL_RGBA8;
+    bool Targets(int w,int h,GLenum color,bool lowMemory) {
+        if(width==w && height==h && colorFormat==color && lowMemoryTargets==lowMemory && scene.fbo) return true;
+        DestroyTargets();width=w;height=h;colorFormat=color;lowMemoryTargets=lowMemory;
+        // Low-RAM phones: 8-bit bloom chain (half the memory and bandwidth).
+        const GLenum working=caps.halfFloat && !lowMemory ? GL_RGBA16F : GL_RGBA8;
         if(!scene.Create(w,h,color)) return false;
         for(int i=0;i<3;++i) {
             int bw=std::max(1,w>>(i+1)),bh=std::max(1,h>>(i+1));
@@ -333,6 +351,9 @@ struct ContextState {
         }
         if(!effects.Create(std::max(1,w/2),std::max(1,h/2),working)) return false;
         if(!atmosphere.Create(std::max(1,w/4),std::max(1,h/4),working)) return false;
+        // State is stored normalised (0..1), so 8-bit works too.
+        if(!state[0].Create(1,1,working) || !state[1].Create(1,1,working)) return false;
+        if(!dof.Create(std::max(1,w>>1),std::max(1,h>>1),working)) return false;
         FX_LOG("FBO %dx%d, bloom=%s",w,h,caps.halfFloat ? "RGBA16F" : "RGBA8");
         return true;
     }
@@ -480,7 +501,62 @@ void AtmospherePass(ContextState& s,const LookProfile& look,bool decode,GLuint d
     glUniform1i(p[Scene],0);glUniform1i(p[Depth],1);glUniform1i(p[HasDepth],depth!=0);
     glUniform1f(p[ClearDepth],s.clearDepth);
     glUniform1i(p[Decode],decode);glUniform4fv(p[Sun],1,look.sun);
+    glUniform2f(p[Rays],look.config.rayLength,look.config.rayDecay);
     glUniform2f(p[Texel],1.0f/s.width,1.0f/s.height);glUniform1f(p[Aspect],float(s.width)/s.height);Draw();
+}
+// Colour LUT strip (size*size x size PNG, e.g. 256x16 / 1024x32 / 4096x64) from
+// TESTLIT/graphics/<Folder>/<File>. Loaded once per path on the render thread.
+void EnsureLut(ContextState& s,const Settings& cfg) {
+    if(s.lutTried && std::strncmp(cfg.lutPath,s.lutLoaded,sizeof(s.lutLoaded))==0) return;
+    s.lutTried=true;std::strncpy(s.lutLoaded,cfg.lutPath,sizeof(s.lutLoaded)-1);
+    if(s.lut) glDeleteTextures(1,&s.lut);
+    s.lut=0;s.lutSize=0;
+    if(!cfg.lutPath[0]) return;
+    int w=0,h=0,n=0;
+    unsigned char* pixels=stbi_load(cfg.lutPath,&w,&h,&n,3);
+    if(!pixels) { FX_LOG("LUT not loaded: %s",cfg.lutPath);return; }
+    if(h<2 || h>64 || w!=h*h) {
+        FX_LOG("LUT %s is %dx%d; expected size*size x size (256x16, 1024x32, 4096x64)",cfg.lutPath,w,h);
+        stbi_image_free(pixels);return;
+    }
+    glGenTextures(1,&s.lut);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,s.lut);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGB8,w,h,0,GL_RGB,GL_UNSIGNED_BYTE,pixels);
+    stbi_image_free(pixels);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+    s.lutSize=h;
+    FX_LOG("LUT loaded: %s (%d)",cfg.lutPath,h);
+}
+// 1x1 state: eye adaptation and the auto-focus distance, eased over time.
+void StatePass(ContextState& s,const Settings& cfg,bool decode,GLuint depth) {
+    const auto now=std::chrono::steady_clock::now();
+    const float dt=s.stateValid ? std::clamp(std::chrono::duration<float>(now-s.stateTime).count(),0.0f,0.5f) : 0.0f;
+    s.stateTime=now;
+    const int write=s.stateIndex^1;
+    const Program& p=s.stateProgram;Begin(s.state[write],p);
+    Texture(0,s.scene.texture);Texture(1,depth ? depth : s.scene.texture);Texture(2,s.state[s.stateIndex].texture);
+    glUniform1i(p[Scene],0);glUniform1i(p[Depth],1);glUniform1i(p[Source],2);
+    glUniform1i(p[HasDepth],depth!=0);glUniform1i(p[Decode],decode);
+    glUniform1f(p[ClearDepth],s.clearDepth);glUniform2fv(p[DepthRange],1,s.depthRange);
+    glUniformMatrix4fv(p[InvProjection],1,GL_FALSE,s.inverse);
+    const float exposureK=s.stateValid ? 1.0f-std::exp(-dt*cfg.aeSpeed) : 1.0f;
+    const float focusK=s.stateValid ? 1.0f-std::exp(-dt*3.0f) : 1.0f;
+    glUniform4f(p[Adapt],cfg.aeKey,cfg.aeMin,cfg.aeMax,exposureK);
+    glUniform4f(p[Focus],focusK,30.0f,0.0f,0.0f);Draw();
+    s.stateIndex=write;s.stateValid=true;
+}
+// Half-resolution blurred copy of the scene for depth of field.
+void DofPass(ContextState& s,bool decode) {
+    Begin(s.dof,s.downsample);Texture(0,s.scene.texture);
+    glUniform1i(s.downsample[Source],0);glUniform2f(s.downsample[Texel],1.0f/s.width,1.0f/s.height);
+    glUniform1i(s.downsample[Decode],decode);glUniform1i(s.downsample[Extract],0);
+    glUniform2f(s.downsample[ThresholdKnee],1.0f,0.2f);Draw();
+    Begin(s.ping[0],s.blur);Texture(0,s.dof.texture);
+    glUniform1i(s.blur[Source],0);glUniform2f(s.blur[Direction],1.6f/s.dof.width,0);Draw();
+    Begin(s.dof,s.blur);Texture(0,s.ping[0].texture);
+    glUniform2f(s.blur[Direction],0,1.6f/s.dof.height);Draw();
 }
 void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,int dw,int dh,bool decode,bool encode) {
     const bool depth=depthTexture!=0;
@@ -493,6 +569,11 @@ void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,i
     Texture(3,s.bloom[2].texture);Texture(4,s.effects.texture);
     Texture(5,depth ? depthTexture : s.scene.texture);Texture(6,s.dirt);
     Texture(7,s.atmosphere.texture);glUniform1i(p[Atmosphere],7);
+    const bool dofActive=depth && cfg.dofStrength>0.0f && s.stateValid;
+    const bool lutActive=s.lut!=0 && cfg.lutStrength>0.0f;
+    Texture(8,s.state[s.stateIndex].texture);Texture(9,dofActive ? s.dof.texture : s.scene.texture);
+    Texture(10,lutActive ? s.lut : s.scene.texture);
+    glUniform1i(p[State],8);glUniform1i(p[DofTex],9);glUniform1i(p[LUT],10);
     glUniform1i(p[Scene],0);glUniform1i(p[Bloom0],1);glUniform1i(p[Bloom1],2);
     glUniform1i(p[Bloom2],3);glUniform1i(p[Effects],4);glUniform1i(p[Depth],5);glUniform1i(p[Dirt],6);
     glUniform1i(p[HasDepth],depth);glUniform1i(p[Decode],decode);glUniform1i(p[Encode],encode);
@@ -515,6 +596,14 @@ void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,i
     glUniform4fv(p[Wet],1,world ? look.wet : zero);
     glUniform2f(p[DepthTexel],1.0f/float(std::max(dw,1)),1.0f/float(std::max(dh,1)));
     glUniform1i(p[FXAA],cfg.fxaa ? 1 : 0);
+    glUniform4fv(p[Haze],1,world ? look.haze : zero);
+    glUniform4fv(p[HazeBase],1,world ? look.hazeBase : zero);
+    glUniform4f(p[AutoExposure],s.stateValid ? cfg.autoExposure : 0.0f,0,0,0);
+    glUniform4f(p[Dof],dofActive ? cfg.dofStrength : 0.0f,0,0,0);
+    glUniform4f(p[Motion],cfg.motionBlur,0.035f,6.0f,world && s.motionActive && cfg.motionBlur>0.0f ? 1.0f : 0.0f);
+    glUniformMatrix4fv(p[PrevViewProj],1,GL_FALSE,s.motionPrev);
+    glUniform4f(p[Lut],cfg.lutStrength,float(std::max(s.lutSize,2)),0,lutActive ? 1.0f : 0.0f);
+    glUniform4f(p[Finish],cfg.grain,cfg.dither,cfg.gradeStrength,0);
     float positions[16]{},colors[16]{};
     for(int i=0;i<cfg.lightCount;++i) {
         const auto& l=cfg.lights[static_cast<size_t>(i)];
@@ -530,6 +619,14 @@ void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,i
 }
 
 
+// Effects dropped first when the adaptive level rises (render thread).
+Settings AdaptiveSettings(Settings c) {
+    const int level=GraphicsSettings::AdaptiveLevel();
+    if(level>=1) { c.ssao=false;c.ssr=false;c.motionBlur=0;c.dofStrength=0; }
+    if(level>=2) { c.sunShafts*=0.5f;c.lensFlare*=0.5f;c.clarity=0; }
+    if(level>=3) { c.autoExposure=0;c.lutStrength=0; }
+    return c;
+}
 FrameEnvironment CurrentEnvironment() {
     std::lock_guard<std::mutex> lock(environmentMutex);return frameEnvironment;
 }
@@ -562,9 +659,14 @@ void UpdateEnvironment(ContextState& s,const FrameEnvironment& input,const World
         else if(m.initialised) { e.sunUV[0]=m.environment.sunUV[0];e.sunUV[1]=m.environment.sunUV[1]; }
         onScreen*=weight;
     }
-    const WeatherTraits traits=EnvironmentTraits(e);
-    const float target=onScreen*Unit(0.3f+0.7f*(e.oldWeather<0&&e.newWeather<0 ? 0.8f : traits.clear))
-        *(1.0f-0.75f*e.cloud)*Smooth(-0.02f,0.08f,e.toSun[2]);
+    // traits.clear already encodes cloudy/rainy weather; CloudCoverage is 1.0
+    // for most weathers (CWeather::Update), so it only trims a little now
+    // (it was counted twice: sun rays/glow vanished in almost every weather).
+    const bool followWeather=GetSettings().weatherLook;
+    const WeatherTraits traits=followWeather ? EnvironmentTraits(e) : WeatherTraits{};
+    const float clear=followWeather && !(e.oldWeather<0&&e.newWeather<0) ? traits.clear : 0.8f;
+    const float target=onScreen*Unit(0.3f+0.7f*clear)
+        *(1.0f-(followWeather ? 0.30f : 0.0f)*e.cloud)*Smooth(-0.02f,0.08f,e.toSun[2]);
     const auto now=std::chrono::steady_clock::now();
     if(!m.initialised) {
         m.initialised=true;m.last=now;m.environment=e;m.traits=traits;m.sunVisibility=target;
@@ -606,7 +708,7 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
     WorldSunShadow::WorldView world;
     const bool haveWorld=beforeHud && WorldSunShadow::GetWorldView(world);
     if(beforeHud) UpdateEnvironment(s,CurrentEnvironment(),haveWorld ? &world : nullptr);
-    const LookProfile look=BuildLook(GetSettings(),s.environment,s.smooth.traits,s.smooth.sunVisibility);
+    const LookProfile look=BuildLook(AdaptiveSettings(GetSettings()),s.environment,s.smooth.traits,s.smooth.sunVisibility);
     const Settings& cfg=look.config;if(!cfg.enabled) return false;
     const unsigned generation=settingsGeneration.load(std::memory_order_relaxed);
     if(s.settingsSeen!=generation) { s.settingsSeen=generation;s.retryFrames=0;s.setupFailures=0;s.failed=false; }
@@ -676,7 +778,7 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
     bool srgb=false;GLenum color=DefaultColor(srgb);if(!color) return false;
     GLint samples=0;glGetIntegerv(GL_SAMPLES,&samples);
     const bool wantDepth=cfg.ssr || cfg.ssao || cfg.fogStrength>0 || cfg.skyStrength>0
-        || cfg.wetStrength>0 || cfg.sunShafts>0;
+        || cfg.wetStrength>0 || cfg.sunShafts>0 || cfg.motionBlur>0 || cfg.dofStrength>0;
     GLuint depthTexture=0;int depthWidth=w,depthHeight=h;
     s.haveView=false;
     if(beforeHud && wantDepth && haveWorld) {
@@ -707,7 +809,7 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
         FX_LOG("PostFX shaders failed %ux%s",s.setupFailures,s.failed ? ", disabled" : ", retry in 120 frames");
         return false;
     }
-    if(!s.Targets(w,h,color)) {
+    if(!s.Targets(w,h,color,cfg.lowMemory)) {
         s.DestroyTargets();s.retryFrames=180;
         FX_LOG("PostFX targets %dx%d unavailable (GPU memory), retry in 180 frames",w,h);
         return false;
@@ -723,7 +825,30 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
     if(windowDepth) glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
     glReadBuffer(static_cast<GLenum>(oldRead));
     const bool decode=cfg.sourceIsSRGB && !srgb;
+    // Motion blur: previous camera of this context. A cut (teleport, respawn,
+    // camera switch: > 8 m or > 25 degrees in one frame) blurs nothing.
+    s.motionActive=false;
+    if(s.haveView && haveWorld) {
+        float vp[16];
+        for(int c=0;c<4;++c) for(int r=0;r<4;++r) {
+            float v=0;for(int k=0;k<4;++k) v+=world.projection[k*4+r]*world.view[c*4+k];
+            vp[c*4+r]=v;
+        }
+        const float* eye=s.invView+12;const float* forward=s.invView+8;
+        if(s.havePrev) {
+            const float dx=eye[0]-s.prevEye[0],dy=eye[1]-s.prevEye[1],dz=eye[2]-s.prevEye[2];
+            const float turn=forward[0]*s.prevForward[0]+forward[1]*s.prevForward[1]+forward[2]*s.prevForward[2];
+            s.motionActive=dx*dx+dy*dy+dz*dz<64.0f && turn>0.906f;
+            std::copy(s.prevViewProj,s.prevViewProj+16,s.motionPrev);
+        }
+        std::copy(vp,vp+16,s.prevViewProj);std::copy(eye,eye+3,s.prevEye);std::copy(forward,forward+3,s.prevForward);
+        s.havePrev=true;
+    } else s.havePrev=false;
+    EnsureLut(s,cfg);
     BloomPasses(s,cfg,decode);
+    if(cfg.autoExposure>0 || cfg.dofStrength>0) StatePass(s,cfg,decode,depthTexture);
+    else s.stateValid=false;
+    if(depthTexture && cfg.dofStrength>0 && s.stateValid) DofPass(s,decode);
     if(depthTexture && (cfg.ssr || cfg.ssao)) DepthPass(s,cfg,decode,depthTexture,depthWidth,depthHeight);
     else {
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER,s.effects.fbo);
@@ -745,7 +870,38 @@ bool TryRender(EGLDisplay d,EGLSurface s,bool early,const float* p=nullptr) noex
     catch(const std::exception& e) { FX_LOG("PostFX skipped: %s",e.what());return false; }
     catch(...) { FX_LOG("PostFX skipped: unknown error");return false; }
 }
+// Adaptive quality: frame rate of GTA's own swaps in 2 s windows. Too slow
+// twice in a row -> one level lighter; fast for 10 s -> one level back.
+void MeasureFrame() {
+    if(!GraphicsRenderThread::OnRenderThread()) return;
+    static std::chrono::steady_clock::time_point start{};
+    static int frames=0,slow=0,fast=0;
+    const auto now=std::chrono::steady_clock::now();
+    if(start==std::chrono::steady_clock::time_point{}) { start=now;frames=0;return; }
+    ++frames;
+    const float elapsed=std::chrono::duration<float>(now-start).count();
+    if(elapsed<2.0f) return;
+    const float fps=float(frames)/elapsed;
+    start=now;frames=0;
+    if(elapsed>6.0f || !GraphicsSettings::AdaptiveEnabled()) { slow=fast=0;return; } // paused / off
+    const int target=GraphicsSettings::TargetFps();
+    const int level=GraphicsSettings::AdaptiveLevel();
+    if(fps<float(target)*0.80f) {
+        fast=0;
+        if(++slow>=2 && level<3) {
+            slow=0;GraphicsSettings::SetAdaptiveLevel(level+1);
+            FX_LOG("adaptive quality: %.0f FPS (target %d) -> level %d",fps,target,level+1);
+        }
+    } else if(fps>float(target)*0.95f) {
+        slow=0;
+        if(++fast>=5 && level>0) {
+            fast=0;GraphicsSettings::SetAdaptiveLevel(level-1);
+            FX_LOG("adaptive quality: %.0f FPS (target %d) -> level %d",fps,target,level-1);
+        }
+    } else slow=fast=0;
+}
 void EndFrame(EGLBoolean result) {
+    MeasureFrame();
     WorldSunShadow::AfterSwap(result);
     auto s=CurrentState(false);if(!s) return;
     s->processedBeforeHud=false;
@@ -903,6 +1059,8 @@ bool InstallHooks() {
         // free a trampoline that another thread may already be executing.
         installed=true;
         WorldSunShadow::InstallDrawHooks(backendHook);
+        TextureFilter::InstallHooks(backendHook);
+        WorldMsaa::InstallHooks(backendHook);
         WorldSunShadow::RequestWorldDepth(GetSettings().enabled);
         FX_LOG("EGL postFX SUN4 installed via ShadowHook; no AML, no RenderWare offset changes");
     });
@@ -924,6 +1082,19 @@ void SetSettings(const Settings& input) {
     c.sunShafts=Clamp(c.sunShafts,0,0.5f,0.24f);c.lensFlare=Clamp(c.lensFlare,0,0.2f,0.045f);
     c.fogStrength=Clamp(c.fogStrength,0,1,0.65f);
     c.skyStrength=Clamp(c.skyStrength,0,1,0.35f);c.wetStrength=Clamp(c.wetStrength,0,1.5f,1.0f);
+    c.motionBlur=Clamp(c.motionBlur,0,1,0);c.dofStrength=Clamp(c.dofStrength,0,1,0);
+    c.autoExposure=Clamp(c.autoExposure,0,1,0.25f);c.aeKey=Clamp(c.aeKey,0.01f,1,0.11f);
+    c.aeMin=Clamp(c.aeMin,0.1f,4,0.5f);c.aeMax=Clamp(c.aeMax,c.aeMin,4,2.5f);c.aeSpeed=Clamp(c.aeSpeed,0.05f,10,1.5f);
+    c.hazeDensity=Clamp(c.hazeDensity,0,0.05f,0.001f);c.hazeUniform=Clamp(c.hazeUniform,0,0.05f,0.0005f);
+    c.hazeStart=Clamp(c.hazeStart,0,2000,40);c.hazeMax=Clamp(c.hazeMax,0,1,0.85f);
+    c.hazeFalloff=Clamp(c.hazeFalloff,0,1,0.045f);c.hazeBaseHeight=Clamp(c.hazeBaseHeight,-200,500,0);
+    c.hazeSun=Clamp(c.hazeSun,0,4,1);c.hazeFoggy=Clamp(c.hazeFoggy,1,10,3);
+    c.rayLength=Clamp(c.rayLength,0.2f,1,0.88f);c.rayDecay=Clamp(c.rayDecay,0.8f,0.999f,0.965f);
+    c.grain=Clamp(c.grain,0,1,0);c.dither=Clamp(c.dither,0,4,1);c.gradeStrength=Clamp(c.gradeStrength,0,1,1);
+    c.lutStrength=Clamp(c.lutStrength,0,1,1);c.lutPath[sizeof(c.lutPath)-1]=0;
+    c.wetReflection=Clamp(c.wetReflection,0,3,1);c.wetPuddles=Clamp(c.wetPuddles,0,2,1);
+    c.wetRipples=Clamp(c.wetRipples,0,2,1);c.wetForce=Clamp(c.wetForce,0,1,0);
+    c.nightThreshold=Clamp(c.nightThreshold,0.1f,1,0.52f);c.nightGlow=Clamp(c.nightGlow,0,4,1);
     for(auto& l:c.lights) {
         for(float& uv:l.uv) uv=Clamp(uv,-2,3,0.5f);
         for(float& rgb:l.color) rgb=Clamp(rgb,0,8,1);

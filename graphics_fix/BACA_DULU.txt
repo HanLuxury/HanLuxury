@@ -1,5 +1,5 @@
-PERBAIKAN GRAFIS (TAHAP 1 + 2 + 3) + VICE CITY - GTA SA Android 2.10 arm64, TANPA AML
-=====================================================================================
+PERBAIKAN GRAFIS (TAHAP 1 - 4) + VICE CITY - GTA SA Android 2.10 arm64, TANPA AML
+==================================================================================
 Ini perbaikan pada sistem grafis YANG SUDAH ADA di source Anda
 (graphics/postfx, graphics/sun, game/Shadow, menu GRAFIS). Tidak ada engine
 kedua, tidak ada menu baru, tidak ada resource Android baru.
@@ -21,6 +21,10 @@ CARA PASANG
    Atau: cd jni && git apply ../graphics_fix/patches/jni.patch
 2. Java/Kotlin: salin java/ ke folder java project (timpa 5 file,
    termasuk com/holy/game/core/GTASA.java).
+2b. Tahap 4: salin TESTLIT/graphics/ (ZyZGfx.ini + ZyZGfx/LUT/) ke
+   /storage/emulated/0/TESTLIT/graphics/ (file graphics Anda yang lain
+   tetap, tidak ditimpa). File baru C++: graphics/TextureFilter.*,
+   graphics/WorldMsaa.*, graphics/postfx/shaders/state.frag.
    Atau: git apply patches/java.patch
 3. Build seperti biasa. AML tidak dibutuhkan lagi untuk grafis.
 
@@ -87,6 +91,69 @@ TAHAP 3: GRAFIS HILANG / SETTING TIDAK TERSIMPAN SAAT RELOG
     tutorial_done, voice, ...), tidak dihapus lagi.
 21. "Reset grafis ke default" sekarang perlu 2 ketukan (seperti Keluar).
 
+TAHAP 4: FC, CUACA, HP RAM/CPU RENDAH, TAMPILAN SEPERTI FOTO, FITUR BARU
+-------------------------------------------------------------------------
+FC (force close):
+22. FC di CRenderer::RenderEverythingBarRoads (backtrace Anda, 0x4f5654 =
+    setelah qsort daftar LOD). sortLODs membaca entity->m_pRwObject dan
+    GetFirstAtomic() tanpa cek NULL: LOD dengan clump tanpa atomic (DFF
+    rusak/diganti) atau entri yang bukan entity hidup = crash. -> daftar
+    LOD dibersihkan sebelum diurutkan (cek pool + clump), jumlah dibatasi.
+    logcat: "Renderer: N of M LOD entries dropped".
+23. Render target teks material (SetObjectMaterialText) BOCOR: refCount
+    dobel, tidak pernah dibebaskan -> memori GPU naik terus dekat mapping
+    -> FC. Diperbaiki + maks 3 per tick, maks 64 MB, Z-buffer dipakai ulang.
+24. Nama tekstur berakhiran "png" -> crash (CSprite2d baca file PNG NULL).
+    -> pakai RwTextureRead langsung.
+25. Daftar database tekstur GTA dibaca dari alamat GOT yang salah ->
+    database GTA terus di-unregister -> stutter berat. Diperbaiki.
+26. Tekstur material yang tidak ada dicari ulang tiap frame + log tiap
+    frame -> sekarang mundur (1,2,3,4 s) lalu berhenti. Tidak ada lagi
+    LoadAllRequestedModels di dalam RPC. ~45 KB RAM per objek dihemat.
+Cuaca:
+27. Hampir semua cuaca (CloudCoverage=1) mematikan bayangan matahari/sinar/
+    glow -> sekarang hanya melembutkan; transisi halus 1 detik.
+28. Cuaca server 23..255 membaca tabel timecycle di luar batas (warna/kabut
+    acak) -> dibatasi 0..22. "Grafis ikut cuaca" Mati sekarang benar-benar
+    tidak memakai cuaca.
+HP RAM/CPU rendah (otomatis):
+29. Deteksi HP: RAM, jumlah core, GPU (Mali-G52/G57, Adreno 5xx/610, ...).
+    RAM < 3.5 GB: bloom 8-bit (hemat memori), peta bayangan maks 1024;
+    RAM < 5.5 GB: maks 2048. CPU lemah: batas caster bayangan 1200.
+30. Baris baru "Kualitas otomatis" (bawaan Nyala): FPS turun -> SSAO,
+    refleksi, DOF, motion blur mati dulu, lalu bayangan dikurangi, lalu
+    dimatikan; FPS normal lagi -> kembali sendiri. logcat EglPostFX:
+    "adaptive quality: ... -> level N".
+31. Preset Rendah sekarang "murah tapi bagus": tanpa replay bayangan,
+    tanpa SSAO/SSR, tapi tetap grading, bloom, kabut matahari, langit,
+    jalan basah, FXAA, anisotropic 2x. Start pertama: preset sesuai HP.
+Tampilan seperti foto (bawaan, bisa diatur di ZyZGfx.ini):
+32. Kabut udara (haze) bertingkat tinggi, terang ke arah matahari (foto
+    pantai), lebih tebal saat kabut/hujan (FoggyWeather).
+33. Auto exposure (adaptasi mata), tonemap filmic 0.5, kontras 0.9,
+    dither anti-banding, LUT warna (contoh: ZyZGfx/LUT/sinematik.png),
+    bloom malam lebih kuat (NightThreshold/NightGlow), sinar matahari
+    Density/Decay, jalan basah Reflection/Puddles/Ripples/Force.
+34. ZyZGfx.ini Anda dibaca dari TESTLIT/graphics/ZyZGfx.ini. Bagian yang
+    belum dipakai client ini tertulis di kepala file (HDR, TAA, Vehicle,
+    Water, Lighting, Wind, Relief, Surfaces, Rain, ExperimentalLights).
+    Tekstur di graphics/textures/ (Rain.png, Ripples.png, dll.) belum
+    dipakai client ini.
+Fitur baru (menu GRAFIS):
+35. MSAA 2x/4x: render target dunia GTA dibuat multisample (extension
+    EXT_multisampled_render_to_texture, murah di Mali/Adreno). Kalau GPU
+    tidak mendukung / target tidak lengkap -> otomatis mati dan baris
+    disembunyikan. Catatan: dengan MSAA, depth dunia untuk PostFX
+    digambar ulang (lebih berat); di HP lemah pakai FXAA saja.
+36. Filter anisotropic 2x-16x (hook rqTextureMipMode/glTexParameteri).
+37. Motion blur kamera (reproyeksi depth; mobil/karakter dekat kamera
+    tetap tajam; tidak blur saat teleport/ganti kamera).
+38. Depth of field: fokus otomatis di tengah layar, latar jauh buram.
+PENTING jika build Anda juga berisi engine EAGLE (logOutput.log menulis
+"EAGLE GraphicsEngine"): jangan nyalakan dua bayangan sekaligus (bayangan
+dobel, berat untuk RAM kecil). Matikan [Shadow] bEnabled di
+graphics/Config.ini, ATAU menu "Bayangan matahari".
+
 VICE CITY (file kiriman Anda)
 -----------------------------
 Dipasang utuh: patch-nya menempel bersih di atas perbaikan grafis, tidak
@@ -122,11 +189,13 @@ Disimpan di /storage/emulated/0/TESTLIT/SAMP/settings.ini bagian [graphics]
 
 TIDAK ADA DI SOURCE (jujur)
 ---------------------------
-MSAA, VSync, Motion Blur (dimatikan RET oleh client), DOF, Anisotropic,
-Texture Quality. Belum dibuat. (FXAA sudah dibuat di tahap 2.)
+VSync (diatur Android/EGL), TAA, Texture Quality. MSAA, Motion Blur, DOF
+dan Anisotropic dibuat di tahap 4 (lihat di atas). FXAA di tahap 2.
 
 STATUS PENGECEKAN
 -----------------
+- Tahap 4: 36 file C++ yang diubah lolos syntax-check aarch64; 15 shader
+  GLSL + 7 link lolos glslang; Kotlin lolos; ZyZGfx.ini dites parser.
 - Tahap 3: 26 file C++ (termasuk modul Vice City) lolos syntax-check
   aarch64. Parser ini dites di host dengan ASan/UBSan.
 - 18 file C++ tahap 1+2 lolos syntax-check aarch64 (clang, -Wall).
@@ -148,17 +217,13 @@ STATUS PENGECEKAN
     "SUN4 shadow targets unavailable" / "PostFX targets ... unavailable"
       (kalau muncul: memori GPU penuh, grafis mencoba lagi sendiri)
 
-MASIH DICEK (menyusul)
-----------------------
-- FC (force close) saat mendekati mapping penuh tekstur: tahap 3 sudah
-  membuat grafis tidak mati permanen, tapi penyebab FC-nya sendiri masih
-  diperiksa (sisi objek material SA-MP dan replay bayangan). Tolong kirim
-  log crash: logcat dari baris "Fatal signal" / "backtrace" sampai bawah,
-  atau file tombstone. Itu yang paling cepat menunjukkan penyebabnya.
-- Cuaca server di luar 0..22 (SetWeather aneh) dan efeknya ke grafis.
+KALAU MASIH FC
+--------------
+Kirim isi /sdcard/TESTLIT/crash_native.txt LENGKAP (baris fault, pc, lr dan
+#00 juga), bukan hanya mulai #01.
 
 BELUM DIKERJAKAN (tahap berikut)
 --------------------------------
 - Culling bayangan RT di tepi layar (SHD-05).
 - Mipmap PowerVR (tekstur shimmer di GPU PowerVR).
-- MSAA/VSync/DOF/Anisotropic: tidak ada di source, perlu dibuat baru.
+- VSync (diatur Android/EGL), TAA, shader kendaraan/air dari ZyZGfx.ini.

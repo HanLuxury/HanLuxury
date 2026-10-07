@@ -1,6 +1,7 @@
 uniform sampler2D uScene;
 uniform vec2 uTexel;
 uniform vec4 uSun; // sun UV, shaft strength, flare strength.
+uniform vec2 uRays; // ray length (share of the way to the sun), decay per step
 uniform float uAspect;
 uniform int uDecodeSRGB;
 #ifdef FX_DEPTH
@@ -37,10 +38,10 @@ vec3 sunEffects(vec2 uv) {
     }
     light/=12.0;open/=12.0;
     float visibility=smoothstep(0.20,0.85,max(light.r,max(light.g,light.b)))*open;
-    vec2 delta=(uSun.xy-uv)*(0.88/24.0);
+    vec2 delta=(uSun.xy-uv)*(uRays.x/24.0);
     vec2 p=uv;vec3 rays=vec3(0);float decay=1.0;
     for(int i=0;i<24;++i) {
-        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=0.965;
+        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=uRays.y;
     }
     vec2 sunDelta=(uv-uSun.xy)*vec2(uAspect,1);
     float halo=exp(-dot(sunDelta,sunDelta)/0.025);

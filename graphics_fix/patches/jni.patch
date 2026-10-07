@@ -251,13 +251,14 @@ index 19938f8..944d33a 100644
  	static void LoadSettings(const char* szNickName, int iChatLines = -1);
  
 diff --git a/app/app_game.cpp b/app/app_game.cpp
-index 566cbc8..2f49a90 100644
+index 566cbc8..8f0ef04 100644
 --- a/app/app_game.cpp
 +++ b/app/app_game.cpp
-@@ -33,8 +33,10 @@
+@@ -33,8 +33,11 @@
  #include "game/Shadow/Shadows.h"
  #include "net/netgame.h"   // CObjectPool::ProcessMaterialText()
  #include "graphics/sun/WorldSunShadow.h"
++#include "graphics/postfx/EglPostFX.h"
 +#include "graphics/RenderThread.h"
  #include "game/TimeCycle.h"
  #include "game/Clock.h"
@@ -265,7 +266,7 @@ index 566cbc8..2f49a90 100644
  #include <algorithm>
  #include <cmath>
  
-@@ -43,6 +45,8 @@ static WorldSunShadow::Frame GetSunShadowFrame()
+@@ -43,6 +46,8 @@ static WorldSunShadow::Frame GetSunShadowFrame()
      WorldSunShadow::Frame frame;
      if(CMirrors::bRenderingReflection || CMirrors::TypeOfMirror || !Scene.m_pRwCamera ||
         CTimeCycle::m_CurrentStoredValue >= 16) return frame;
@@ -274,7 +275,35 @@ index 566cbc8..2f49a90 100644
      // All fields already belong to the client's existing clock/weather/camera
      // integration. No new address lookup or modification of the game clock.
      const auto sun=CTimeCycle::GetVectorToSun();
-@@ -167,6 +171,14 @@ void InstallRenderEffectsHook()
+@@ -51,13 +56,25 @@ static WorldSunShadow::Frame GetSunShadowFrame()
+     const float hour=float(CClock::GetGameClockHours())+float(CClock::GetGameClockMinutes())/60.0f;
+     auto unit=[](float value) {return std::isfinite(value) ? std::clamp(value,0.0f,1.0f):0.0f;};
+     const float daylight=unit((hour-5.0f)/1.25f)*unit((20.0f-hour)/1.5f)*unit((sun.z-0.01f)/0.18f);
+-    frame.sunlight=daylight*(1-unit(CWeather::Rain))*(1-0.8f*unit(CWeather::CloudCoverage))
++    // CWeather::Update (0x6f11a4..0x6f11dc, 0x6f1a68) sets CloudCoverage=1 for
++    // every weather outside {0,1,2,3,5,6,10,11,13,14,17,18} and every id >= 19,
++    // and SA-MP's SetWeather makes it jump there in one frame. Before, that
++    // cut the sun shadows to 20% at once in most weathers ("graphics gone").
++    // Clouds now only soften the sun; with "Grafis ikut cuaca" off they do not
++    // count at all. Heavy rain still hides the sun. Eased (~1 s), no popping.
++    const bool followWeather=EglPostFX::GetSettings().weatherLook;
++    const float cloud=followWeather ? unit(CWeather::CloudCoverage) : 0.0f;
++    const float target=daylight*(1-0.75f*unit(CWeather::Rain))*(1-0.35f*cloud)
+         *(1-unit(CWeather::UnderWaterness))*(1-unit(CWeather::InTunnelness));
++    static float eased=-1.0f;
++    eased=eased<0.0f ? target : eased+(target-eased)*0.06f;
++    frame.sunlight=eased;
+     frame.focus[0]=position.x+front.x*22.0f;
+     frame.focus[1]=position.y+front.y*22.0f;
+     frame.focus[2]=position.z+front.z*22.0f;
+     frame.toSun[0]=sun.x;frame.toSun[1]=sun.y;frame.toSun[2]=sun.z;
+-    frame.valid=frame.sunlight>0.0f;
++    // Too faint to see: skip the whole caster replay.
++    frame.valid=frame.sunlight>0.02f;
+     return frame;
+ }
+ 
+@@ -167,6 +184,14 @@ void InstallRenderEffectsHook()
  
  void RenderEffects()
  {
@@ -289,7 +318,7 @@ index 566cbc8..2f49a90 100644
      // Preserve GTA's full effects order, as in the Alyn native render loop.
      if (RenderEffectsOriginal)
          RenderEffectsOriginal();
-@@ -180,14 +192,18 @@ void Render2dStuff()
+@@ -180,14 +205,18 @@ void Render2dStuff()
  {
      // This boundary is hooked in the Alyn flow; its native RenderScene remains
      // untouched. Composite before an alternate target is flushed and before HUD.
@@ -311,7 +340,7 @@ index 566cbc8..2f49a90 100644
      // Read existing client values only; never patch weather/time/corona offsets.
      EglPostFX::FrameEnvironment fxEnvironment;
      fxEnvironment.valid=true;
-@@ -195,13 +211,24 @@ void Render2dStuff()
+@@ -195,13 +224,24 @@ void Render2dStuff()
      fxEnvironment.rain=CWeather::Rain;fxEnvironment.wetness=CWeather::WetRoads;
      fxEnvironment.cloud=CWeather::CloudCoverage;fxEnvironment.fog=CWeather::Foggyness;
      fxEnvironment.underwater=CWeather::UnderWaterness;fxEnvironment.tunnel=CWeather::InTunnelness;
@@ -339,7 +368,7 @@ index 566cbc8..2f49a90 100644
  
      RwRenderStateSet(rwRENDERSTATEZTESTENABLE, RWRSTATE(FALSE));
      RwRenderStateSet(rwRENDERSTATEZWRITEENABLE, RWRSTATE(FALSE));
-@@ -236,7 +263,11 @@ void Render2dStuff()
+@@ -236,7 +276,11 @@ void Render2dStuff()
              ( ( void(*)(bool) )(g_libGTASA + (VER_x32 ? 0x002B0BD8 + 1 : 0x36FB00)) )(false); // CTouchInterface::DrawAll
      }
  
@@ -416,6 +445,449 @@ index 309dbe7..09efcc5 100644
  
      CVector Pos = CModelInfo::ms_modelInfoPtrs[veh->m_nModelIndex]->m_pColModel->m_boundBox.m_vecMin;
      CVector center  = veh->TransformFromObjectSpace(CVector(0.0f, 0.0f, 0.0f));
+diff --git a/game/ObjectSamp.cpp b/game/ObjectSamp.cpp
+index 9597723..f52b202 100644
+--- a/game/ObjectSamp.cpp
++++ b/game/ObjectSamp.cpp
+@@ -69,7 +69,7 @@ float subAngle(float a1, float a2)
+ 
+ CObjectSamp::CObjectSamp(int iModel, float fPosX, float fPosY, float fPosZ, CVector vecRot, float fDrawDistance)
+ {
+-    m_MaterialBackups.reserve(32);
++    // No reserve: only objects with materials push backups (12.8 KB saved per object).
+ 	if(!CModelInfo::GetModelInfo(iModel))
+ 		iModel = 18631; // ��������
+ 
+@@ -500,22 +500,14 @@ static RwTexture* LoadTextureFromTxd(const char* txdName, const char* textureNam
+     CTxdStore::PushCurrentTxd();
+     CTxdStore::SetCurrentTxd(static_cast<uint32_t>(slot));
+ 
+-    RwTexture* texture = nullptr;
+-    {
+-        CSprite2d sprite;
+-        sprite.m_pTexture = nullptr;
+-        sprite.SetTexture(textureName);
+-        texture = sprite.m_pTexture;
+-        // Keep one reference after CSprite2d releases its temporary reference.
+-        if (texture) ++texture->refCount;
+-    }
++    // RwTextureRead directly, not CSprite2d::SetTexture: for a name ending in
++    // "png" SetTexture (0x6ecce8) reads a PNG FILE (RtPNGImageRead 0x6ecd94)
++    // and passes a NULL image on (0x6ecdbc) -> SIGSEGV. A server texture name
++    // is never a file. RwTextureRead returns one reference: the slot's.
++    RwTexture* texture = RwTextureRead(textureName, nullptr);
+ 
+     CTxdStore::PopCurrentTxd();
+-
+-    if (!texture) {
+-        Log("ObjectMaterial: texture '%s' not found", textureName);
+-    }
+-    return texture;
++    return texture; // the caller logs a missing texture once (no per-frame log)
+ }
+ 
+ static RwTexture* GetBlankTexture()
+@@ -579,7 +571,7 @@ public:
+         // RwCameraBeginUpdate()/the GLES render path may succeed but discard
+         // the 2D draw lists on some devices, producing a permanently blank
+         // material-text texture.
+-        RwRaster* zRaster = RwRasterCreate(sizeX, sizeY, 0, rwRASTERTYPEZBUFFER);
++        RwRaster* zRaster = GetZRaster(sizeX, sizeY);
+         if (!zRaster) {
+             RwTextureDestroy(texture);
+             return nullptr;
+@@ -606,7 +598,6 @@ public:
+         if (!io.Fonts || !io.Fonts->TexID) {
+             io.DisplaySize = oldDisplaySize;
+             io.DisplayFramebufferScale = oldFramebufferScale;
+-            RwRasterDestroy(zRaster);
+             RwTextureDestroy(texture);
+             return nullptr;
+         }
+@@ -628,7 +619,6 @@ public:
+             if (previousCamera) CVisibilityPlugins::SetRenderWareCamera(previousCamera);
+             io.DisplaySize = oldDisplaySize;
+             io.DisplayFramebufferScale = oldFramebufferScale;
+-            RwRasterDestroy(zRaster);
+             RwTextureDestroy(texture);
+             return nullptr;
+         }
+@@ -658,15 +648,29 @@ public:
+         io.DisplaySize = oldDisplaySize;
+         io.DisplayFramebufferScale = oldFramebufferScale;
+ 
+-        // RwTextureCreate starts with one reference; the material slot takes
+-        // ownership of one additional reference, matching Alyn's lifetime
+-        // model and keeping the raster alive after this function returns.
+-        ++texture->refCount;
+-        RwRasterDestroy(zRaster);
++        // RwTextureCreate (0x273f74) starts the texture at refCount 1 (str of
++        // 0x1_00000000 at +0x60, 0x273fc4): that reference IS the material
++        // slot's. The old extra ++refCount left every material-text render
++        // target at 1 after the slot released it (RwTextureDestroy 0x273e2c
++        // frees only at 0): a GPU memory leak on every stream-in or text
++        // change, until the game was killed near big mappings.
+         return texture;
+     }
+ 
+ private:
++    // One Z raster per material size (at most 14), reused for every text
++    // instead of creating and destroying one per call.
++    struct ZEntry { int w, h; RwRaster* raster; };
++    std::vector<ZEntry> m_zRasters;
++    RwRaster* GetZRaster(int w, int h)
++    {
++        for (const ZEntry& z : m_zRasters)
++            if (z.w == w && z.h == h) return z.raster;
++        RwRaster* raster = RwRasterCreate(w, h, 0, rwRASTERTYPEZBUFFER);
++        if (raster) m_zRasters.push_back({w, h, raster});
++        return raster;
++    }
++
+     bool SetUpScene()
+     {
+         if (!Scene.m_pRpWorld) return false;
+@@ -813,6 +817,40 @@ static void ReleaseMaterialSourceModel(ObjectMaterialState& material)
+     material.sourceModelPinned = false;
+ }
+ 
++// Material-text render targets: at most a few new ones per game tick and a
++// cap on the bytes alive at once. Heavy mappings push hundreds of
++// SetObjectMaterialText slots in one burst; rendering all of them in one tick
++// (each a camera raster + ImGui frame + FBO switch) stalled the game and
++// spiked GPU memory. Slots over budget stay pending and are made later.
++namespace {
++constexpr int    kMaterialTextPerTick  = 3;
++constexpr size_t kMaterialTextMaxBytes = size_t(64) << 20;
++size_t g_materialTextBytes = 0;
++int    g_materialTextLeft  = kMaterialTextPerTick;
++
++bool TakeMaterialTextJob(size_t bytes)
++{
++    if (CObjectPool::IsSpawnMaterialCooldownActive()) return false;
++    if (g_materialTextLeft <= 0) return false;
++    if (g_materialTextBytes + bytes > kMaterialTextMaxBytes) return false;
++    --g_materialTextLeft;
++    return true;
++}
++
++void ReleaseMaterialTexture(ObjectMaterialState& material)
++{
++    if (material.texture) RwTextureDestroy(material.texture);
++    material.texture = nullptr;
++    g_materialTextBytes -= std::min<size_t>(g_materialTextBytes, material.textBytes);
++    material.textBytes = 0;
++}
++} // namespace
++
++void CObjectSamp::BeginMaterialTextTick()
++{
++    g_materialTextLeft = kMaterialTextPerTick;
++}
++
+ void CObjectSamp::SetMaterial(int modelId, uint8_t materialIndex, const char* txdName,
+                               const char* textureName, uint32_t color)
+ {
+@@ -824,11 +862,7 @@ void CObjectSamp::SetMaterial(int modelId, uint8_t materialIndex, const char* tx
+ 
+     ObjectMaterialState& material = m_Material[materialIndex];
+     ReleaseMaterialSourceModel(material);
+-
+-    if (material.texture) {
+-        RwTextureDestroy(material.texture);
+-        material.texture = nullptr;
+-    }
++    ReleaseMaterialTexture(material);
+ 
+     material.type = OBJECT_MATERIAL_TEXTURE;
+     material.color = color;
+@@ -839,6 +873,8 @@ void CObjectSamp::SetMaterial(int modelId, uint8_t materialIndex, const char* tx
+     material.textureName[sizeof(material.textureName) - 1] = '\0';
+     material.textureWasCreated = false;
+     material.sourceModelPinned = false;
++    material.lookupFailures = 0;
++    material.nextLookupTick = 0;
+ 
+     // SA-MP: -1 = keep original texture and optionally change material color;
+     // 0 = replace with the transparent/blank texture; >0 = texture comes from
+@@ -853,17 +889,17 @@ void CObjectSamp::SetMaterial(int modelId, uint8_t materialIndex, const char* tx
+         material.textureWasCreated = (material.texture != nullptr);
+     } else if (modelId < CModelInfo::NUM_MODEL_INFOS &&
+                IsValidModel(static_cast<unsigned int>(modelId))) {
+-        if (!CStreaming::IsModelLoaded(modelId)) {
++        // Name lookup first: the texture databases load entries on demand.
++        // The source model is only requested (asynchronously) when that
++        // fails; never LoadAllRequestedModels() inside an RPC (a streamer
++        // burst near a big mapping stalled the game for every slot).
++        material.texture = LoadTextureFromTxd(material.txdName, material.textureName);
++        material.textureWasCreated = (material.texture != nullptr);
++        if (!material.textureWasCreated && !CStreaming::IsModelLoaded(modelId)) {
+             CStreaming::RequestModel(modelId,
+                 STREAMING_GAME_REQUIRED | STREAMING_KEEP_IN_MEMORY);
+-            CStreaming::LoadAllRequestedModels(false);
+             material.sourceModelPinned = true;
+         }
+-
+-        if (CStreaming::IsModelLoaded(modelId)) {
+-            material.texture = LoadTextureFromTxd(material.txdName, material.textureName);
+-            material.textureWasCreated = (material.texture != nullptr);
+-        }
+     }
+ 
+     m_bHasCustomObjectMaterial = true;
+@@ -881,10 +917,8 @@ void CObjectSamp::SetMaterialText(uint8_t materialIndex, uint8_t materialSize, c
+     ChangeToOriginalObjectMaterial();
+ 
+     ObjectMaterialState& material = m_Material[materialIndex];
+-    if (material.texture) {
+-        RwTextureDestroy(material.texture);
+-        material.texture = nullptr;
+-    }
++    ReleaseMaterialSourceModel(material);
++    ReleaseMaterialTexture(material);
+ 
+     ObjectMaterialText& info = material.textInfo;
+     info.materialSize = materialSize;
+@@ -895,8 +929,7 @@ void CObjectSamp::SetMaterialText(uint8_t materialIndex, uint8_t materialSize, c
+     info.fontColor = fontColor;
+     info.backgroundColor = backgroundColor;
+     info.align = align;
+-    std::strncpy(info.text, text, sizeof(info.text) - 1);
+-    info.text[sizeof(info.text) - 1] = '\0';
++    info.text.assign(text, strnlen(text, 2048));
+ 
+     material.type = OBJECT_MATERIAL_TEXT;
+     material.color = 0;
+@@ -929,29 +962,42 @@ void CObjectSamp::ProcessMaterialText()
+             }
+ 
+             const int32_t modelId = material.modelId;
++            const uint32_t now = GetTickCount();
++            if (static_cast<int32_t>(material.nextLookupTick - now) > 0) continue;
+             if (!CStreaming::IsModelLoaded(modelId)) {
+-                CStreaming::RequestModel(modelId,
+-                    STREAMING_GAME_REQUIRED | STREAMING_KEEP_IN_MEMORY);
+-                material.sourceModelPinned = true;
++                if (!material.sourceModelPinned) {
++                    CStreaming::RequestModel(modelId,
++                        STREAMING_GAME_REQUIRED | STREAMING_KEEP_IN_MEMORY);
++                    material.sourceModelPinned = true;
++                }
++                material.nextLookupTick = now + 250u;
+                 continue;
+             }
+ 
+             RwTexture* texture = LoadTextureFromTxd(material.txdName, material.textureName);
+             if (texture) {
+-                if (material.texture) RwTextureDestroy(material.texture);
++                ReleaseMaterialTexture(material);
+                 material.texture = texture;
+                 material.textureWasCreated = true;
+-                // Deliberately do not RemoveModel(): the Android renderer can
+-                // evict the source TXD/DFF independently of the RwTexture
+-                // pointer. Keep the source model resident until this material
+-                // is replaced/cleared.
++                // The slot's own reference keeps the texture alive when the
++                // source TXD unloads (CTxdStore::RemoveTxd detaches textures
++                // with refCount >= 2, 0x6f90f4), so the source model no longer
++                // has to stay pinned in streaming memory.
++                ReleaseMaterialSourceModel(material);
++            } else if (++material.lookupFailures >= 5) {
++                Log("ObjectMaterial: texture '%s' not found, keeping the model texture",
++                    material.textureName);
++                material.textureWasCreated = true; // stop retrying; colour still applies
++                ReleaseMaterialSourceModel(material);
++            } else {
++                material.nextLookupTick = now + 1000u * material.lookupFailures;
+             }
+             continue;
+         }
+ 
+         if (material.textureWasCreated || material.type != OBJECT_MATERIAL_TEXT)
+             continue;
+-        if (!material.textInfo.text[0])
++        if (material.textInfo.text.empty())
+             continue;
+ 
+         ObjectMaterialText& info = material.textInfo;
+@@ -968,14 +1014,19 @@ void CObjectSamp::ProcessMaterialText()
+         const uint8_t renderFontSize = static_cast<uint8_t>(std::max<int>(1,
+             static_cast<int>(info.fontSize * 0.75f)));
+ 
++        const size_t bytes = size_t(sizeX) * size_t(sizeY) * 4u;
++        if (!TakeMaterialTextJob(bytes)) continue; // stays pending, next tick
++
+         RwTexture* generated = g_materialTextGenerator.Create(
+             sizeX, sizeY, renderFontSize, info.fontColor, info.backgroundColor,
+-            info.align, info.text);
++            info.align, info.text.c_str());
+ 
+         if (!generated) continue;
+ 
+-        if (material.texture) RwTextureDestroy(material.texture);
++        ReleaseMaterialTexture(material);
+         material.texture = generated;
++        material.textBytes = static_cast<uint32_t>(bytes);
++        g_materialTextBytes += bytes;
+         material.textureWasCreated = true;
+     }
+ }
+@@ -987,7 +1038,7 @@ void CObjectSamp::ClearAllMaterials()
+ 
+     for (auto& material : m_Material) {
+         ReleaseMaterialSourceModel(material);
+-        if (material.texture) RwTextureDestroy(material.texture);
++        ReleaseMaterialTexture(material);
+         material = {};
+     }
+     m_bHasCustomObjectMaterial = false;
+diff --git a/game/ObjectSamp.h b/game/ObjectSamp.h
+index 68b59f9..0e81a1c 100644
+--- a/game/ObjectSamp.h
++++ b/game/ObjectSamp.h
+@@ -3,6 +3,7 @@
+ #include <cstdint>
+ #include <array>
+ #include <vector>
++#include <string>
+ #include <unordered_map>
+ #include <mutex>
+ 
+@@ -51,7 +52,9 @@ struct ObjectMaterialText {
+     uint32_t fontColor = 0xFFFFFFFF;
+     uint32_t backgroundColor = 0;
+     uint8_t  align = OBJECT_MATERIAL_ALIGN_CENTER;
+-    char     text[2049]{};
++    // Heap string (max 2048 chars): a fixed char[2049] in all 16 slots of every
++    // object cost ~32 KB per SA-MP object even without any material.
++    std::string text;
+ };
+ 
+ struct ObjectMaterialState {
+@@ -68,6 +71,12 @@ struct ObjectMaterialState {
+     // One reference owned by this slot, released with RwTextureDestroy.
+     RwTexture*         texture = nullptr;
+     uint32_t           color = 0;
++    // Bytes of the material-text render target held by this slot (budget).
++    uint32_t           textBytes = 0;
++    // Texture name lookups that failed: retried with a growing delay, then
++    // given up (the model's own texture stays) instead of every frame.
++    uint8_t            lookupFailures = 0;
++    uint32_t           nextLookupTick = 0;
+ 
+     // Parameters are retained so an object whose model/TXD is still streaming
+     // can resolve the material later without losing the server's request.
+@@ -155,6 +164,8 @@ public:
+                          uint8_t fontSize, uint8_t fontBold, uint32_t fontColor,
+                          uint32_t backgroundColor, uint8_t align, const char* text);
+     void ProcessMaterialText();
++    // Called once per game tick before ProcessMaterialText() of all objects.
++    static void BeginMaterialTextTick();
+     void ClearAllMaterials();
+ 
+     // Around CObject::Render (see CObjectMaterialScope in hooks.cpp).
+diff --git a/game/Renderer.cpp b/game/Renderer.cpp
+index 22c5fca..ed9fe91 100644
+--- a/game/Renderer.cpp
++++ b/game/Renderer.cpp
+@@ -6,6 +6,10 @@
+ #include "World.h"
+ #include "CWorldScan.h"
+ #include "Streaming.h"
++#include "Pools.h"
++#include "RwHelper.h"
++#include <algorithm>
++#include <type_traits>
+  
+ void CRenderer::ScanWorld() {
+     static CVector oldCameraPosn;
+@@ -132,6 +136,77 @@ static void AddEntityToRenderList_hook(CEntity* entity, float distance)
+     AddEntityToRenderList_orig(entity, distance);
+ }
+ 
++// FC near big mappings, backtrace RenderEverythingBarRoads+0x4a8 (0x4f5654)
++// right after qsort(ms_aVisibleLodPtrs, ms_nNoOfVisibleLods, 8, sortLODs)
++// (0x4f5650). sortLODs (0x4f5104) dereferences every entry:
++// entity->m_pRwObject (+0x20), GetFirstAtomic() for a clump (no NULL check on
++// the result, 0x4f512c -> 0x4f5130), atomic->geometry, instance data. A LOD
++// whose clump has no atomic (broken or replaced DFF) or an entry that is no
++// longer a live entity crashed inside the sort. The list is cleaned first;
++// a dropped LOD is simply not drawn this frame.
++namespace {
++template <class Pool>
++bool LiveInPool(Pool* pool, const void* entity)
++{
++    if (!pool || !pool->m_pObjects || !pool->m_byteMap || pool->m_nSize <= 0) return false;
++    using Slot = std::remove_pointer_t<decltype(pool->m_pObjects)>;
++    const auto base = reinterpret_cast<uintptr_t>(pool->m_pObjects);
++    const auto address = reinterpret_cast<uintptr_t>(entity);
++    if (address < base) return false;
++    const uintptr_t offset = address - base;
++    if (offset % sizeof(Slot) != 0) return false;
++    const uintptr_t index = offset / sizeof(Slot);
++    if (index >= static_cast<uintptr_t>(pool->m_nSize)) return false;
++    return !pool->IsFreeSlotAtIndex(static_cast<int32>(index));
++}
++
++bool IsSafeLodEntry(CEntity* entity)
++{
++    if (!entity) return false;
++    if (!LiveInPool(CPools::ms_pBuildingPool, entity) &&
++        !LiveInPool(CPools::ms_pDummyPool, entity) &&
++        !LiveInPool(CPools::ms_pObjectPool, entity)) {
++        return false;
++    }
++    RwObject* object = entity->m_pRwObject;
++    if (!object) return true; // sortLODs checks this one
++    if (object->type == rpATOMIC) return true;
++    if (object->type == rpCLUMP) return GetFirstAtomic(reinterpret_cast<RpClump*>(object)) != nullptr;
++    return false;
++}
++
++int32* VisibleLodCount()
++{
++    // GOT slot of CRenderer::ms_nNoOfVisibleLods (R_AARCH64_GLOB_DAT 0x84A4A0).
++    static int32* count = nullptr;
++    if (!count) count = *reinterpret_cast<int32**>(g_libGTASA + 0x84A4A0);
++    return count;
++}
++
++void (*RenderEverythingBarRoads_orig)() = nullptr;
++void RenderEverythingBarRoads_hook()
++{
++    if (int32* count = VisibleLodCount()) {
++        const int32 total = std::clamp(*count, 0, static_cast<int32>(MAX_VISIBLE_LOD_PTRS) - 1);
++        int32 kept = 0;
++        for (int32 i = 0; i < total; ++i) {
++            CEntity* entity = CRenderer::ms_aVisibleLodPtrs[i];
++            if (IsSafeLodEntry(entity)) CRenderer::ms_aVisibleLodPtrs[kept++] = entity;
++        }
++        if (kept != *count) {
++            static int reported = 0;
++            if (reported < 8) {
++                ++reported;
++                Log("Renderer: %d of %d LOD entries dropped (invalid entity or clump without atomic)",
++                    *count - kept, *count);
++            }
++        }
++        *count = kept;
++    }
++    if (RenderEverythingBarRoads_orig) RenderEverythingBarRoads_orig();
++}
++} // namespace
++
+ void CRenderer::InjectHooks() {
+     CHook::Write(g_libGTASA + (VER_x32 ? 0x6764D0 : 0x84AA10), &ms_bRenderOutsideTunnels);
+     CHook::Write(g_libGTASA + (VER_x32 ? 0x67914C : 0x8502C8), &m_loadingPriority);
+@@ -146,6 +221,8 @@ void CRenderer::InjectHooks() {
+         CHook::Write(g_libGTASA + 0x84A958, &ms_aVisibleLodPtrs);
+         CHook::InlineHook("_ZN9CRenderer21AddEntityToRenderListEP7CEntityf",
+                           &AddEntityToRenderList_hook, &AddEntityToRenderList_orig);
++        CHook::InlineHook("_ZN9CRenderer24RenderEverythingBarRoadsEv",
++                          &RenderEverythingBarRoads_hook, &RenderEverythingBarRoads_orig);
+     }
+ 
+     // CHook::Redirect("_ZN9CRenderer9ScanWorldEv", &ScanWorld); // WARNING: FPS drop
 diff --git a/game/Shadow/RealTimeShadowManager.cpp b/game/Shadow/RealTimeShadowManager.cpp
 index e69e15d..1388a90 100644
 --- a/game/Shadow/RealTimeShadowManager.cpp
@@ -961,6 +1433,23 @@ index b2ecff9..99289f3 100644
              factorY = +1;
          }
          CWorld::IncrementCurrentScanCode();
+diff --git a/game/Textures/TextureDatabaseRuntime.cpp b/game/Textures/TextureDatabaseRuntime.cpp
+index b66d6ce..10918c5 100644
+--- a/game/Textures/TextureDatabaseRuntime.cpp
++++ b/game/Textures/TextureDatabaseRuntime.cpp
+@@ -58,7 +58,11 @@ TextureDatabaseRuntime* TextureDatabaseRuntime::GetDatabase(const char *dbName)
+ 
+ TDBArray<TextureDatabaseRuntime*>& TextureDatabaseRuntime::GetRegisteredDatabases()
+ {
+-    return *reinterpret_cast<TDBArray<TextureDatabaseRuntime*>*>(
++    // 0x851CF8 is the GOT slot (R_AARCH64_GLOB_DAT) holding the ADDRESS of
++    // TextureDatabaseRuntime::registered (0x89AA08), not the array itself.
++    // Reading the slot as the array made TxdStoreFindCB never see a database
++    // as registered, so it unregistered GTA's own databases after a lookup.
++    return **reinterpret_cast<TDBArray<TextureDatabaseRuntime*>**>(
+         g_libGTASA + (VER_x32 ? 0x679E70 : 0x851CF8));
+ }
+ 
 diff --git a/game/World.cpp b/game/World.cpp
 index 902de5e..fe6491f 100644
 --- a/game/World.cpp
@@ -978,10 +1467,38 @@ index 902de5e..fe6491f 100644
  
  void (*CWorld_ProcessPedsAfterPreRender_orig)();
 diff --git a/game/game.cpp b/game/game.cpp
-index a76ade4..187759e 100644
+index a76ade4..c8f2779 100644
 --- a/game/game.cpp
 +++ b/game/game.cpp
-@@ -711,7 +711,7 @@ void CGame::Process() {
+@@ -24,6 +24,7 @@
+ #include "game/Widgets/TouchInterface.h"
+ #include "GrassRenderer.h"
+ #include "Weather.h"
++#include "Enums/eWeatherType.h"
+ #include "Clock.h"
+ #include "CPlayerInfoGta.h"
+ #include "WaterLevel.h"
+@@ -315,9 +316,16 @@ void CGame::SetWorldTime(int iHour, int iMinute) {
+ }
+ 
+ void CGame::SetWorldWeather(unsigned char byteWeatherID) {
+-    CWeather::ForcedWeatherType = byteWeatherID;
+-    CWeather::OldWeatherType = byteWeatherID;
+-    CWeather::NewWeatherType = byteWeatherID;
++    // SA-MP allows 0..255, libGTASA never range-checks: CWeather::Update copies
++    // Forced into New (0x6f0e94..0x6f0e9c) and CColourSet::CColourSet (0x501e6c)
++    // reads table[hour*23 + weather] from the [8][23] timecycle tables, which
++    // CTimeCycle::InjectHooks redirected to the client's own arrays. Ids >= 23
++    // read unrelated client memory (fog/far clip/colours garbage: "graphics
++    // gone"). Keep a valid column; m_byteWeather keeps the server value.
++    const auto weather = static_cast<int16>(byteWeatherID % NUM_WEATHERS);
++    CWeather::ForcedWeatherType = weather;
++    CWeather::OldWeatherType = weather;
++    CWeather::NewWeatherType = weather;
+ }
+ 
+ void CGame::ToggleThePassingOfTime(bool bOnOff)
+@@ -711,7 +719,7 @@ void CGame::Process() {
  //		if ( !CCutsceneMgr::ms_running )
  //			CTheCarGenerators::Process();
  //		CCranes::UpdateCranes();
@@ -990,7 +1507,7 @@ index a76ade4..187759e 100644
  		((void (*)()) (g_libGTASA + (VER_x32 ? 0x005A6720 + 1 : 0x6CA130)))(); // CMovingThings::Update();
  		((void(*)())(g_libGTASA + (VER_x32 ? 0x005CBB20 + 1 : 0x6F04CC)))(); // CWaterCannons::Update()
  //		CUserDisplay::Process();
-@@ -749,7 +749,11 @@ void CGame::Process() {
+@@ -749,7 +757,11 @@ void CGame::Process() {
  		((void (*)()) (g_libGTASA + (VER_x32 ? 0x005A22C8 + 1 : 0x6C5BE0)))(); // CCoronas::Update()
  		((void (*)()) (g_libGTASA + (VER_x32 ? 0x005BD370 + 1 : 0x6E1BC4)))(); // CShadows::UpdatePermanentShadows()
  
@@ -1186,18 +1703,31 @@ index 6e92bdc..577f5f9 100644
  
 diff --git a/graphics/GraphicsSettings.cpp b/graphics/GraphicsSettings.cpp
 new file mode 100644
-index 0000000..7014dfd
+index 0000000..87875ca
 --- /dev/null
 +++ b/graphics/GraphicsSettings.cpp
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,344 @@
 +#include "GraphicsSettings.h"
 +#include "postfx/EglPostFX.h"
 +#include "sun/WorldSunShadow.h"
++#include "TextureFilter.h"
++#include "WorldMsaa.h"
++#include "../main.h"
++#include "../CSettings.h"
 +#include "../game/game.h"
++#include "../game/Mobile/MobileSettings/MobileSettings.h"
 +#include "../vendor/ini/config.h"
++#include <android/log.h>
++#include <sys/sysinfo.h>
++#include <unistd.h>
 +#include <algorithm>
 +#include <array>
 +#include <atomic>
++#include <cmath>
++#include <cstdio>
++#include <cstring>
++
++#define GS_LOG(...) __android_log_print(ANDROID_LOG_INFO, "GfxSettings", __VA_ARGS__)
 +
 +namespace GraphicsSettings {
 +namespace {
@@ -1210,28 +1740,154 @@ index 0000000..7014dfd
 +// mid-range phones, all fixes active. Ultra is meant for flagship GPUs.
 +constexpr std::array<Spec,COUNT> kSpecs{{
 +    {"preset",            0,   4, {0,   1,   2,   3}},
-+    {"postfx",            0,   1, {0,   1,   1,   1}},
++    {"postfx",            0,   1, {1,   1,   1,   1}},
 +    {"sun_shadows",       0,   1, {0,   1,   1,   1}},
 +    {"shadow_quality",    0,   3, {0,   1,   2,   3}},
 +    {"shadow_distance",  30, 150, {40,  60,  80, 120}},
 +    {"soft_shadows",      0,   2, {0,   1,   1,   2}},
 +    {"ambient_occlusion", 0,   1, {0,   0,   1,   1}},
 +    {"reflections",       0,   1, {0,   0,   1,   1}},
-+    {"sun_rays",          0, 100, {0,  40,  50,  60}},
-+    {"bloom",             0, 100, {25, 35,  40,  45}},
-+    {"sky",               0, 100, {0,  30,  35,  45}},
-+    {"wet_roads",         0, 150, {0, 100, 100, 120}},
++    {"sun_rays",          0, 100, {30,  50,  60,  70}},
++    {"bloom",             0, 100, {30,  40,  45,  50}},
++    {"sky",               0, 100, {25,  35,  40,  45}},
++    {"wet_roads",         0, 150, {60, 100, 110, 120}},
 +    {"weather_look",      0,   1, {1,   1,   1,   1}},
-+    {"fog",               0, 100, {50, 60,  65,  70}},
++    {"fog",               0, 100, {60,  70,  80,  85}},
 +    {"grass",             0,   1, {0,   1,   1,   1}},
-+    {"fxaa",              0,   1, {0,   1,   1,   1}},
++    {"fxaa",              0,   1, {1,   1,   1,   1}},
++    {"msaa",              0,   2, {0,   0,   0,   1}},
++    {"motion_blur",       0, 100, {0,   0,   0,  30}},
++    {"dof",               0, 100, {0,   0,  20,  35}},
++    {"anisotropic",       0,   4, {1,   2,   3,   4}},
++    {"auto_quality",      0,   1, {1,   1,   1,   1}},
 +}};
++// "Rendah" = the cheap but still pretty look for weak phones: no sun-shadow
++// replay, no SSAO/SSR, but grading, bloom, haze, sky, wet roads and FXAA.
 +constexpr int32_t kDefaultPreset=1;
 +std::array<int32_t,COUNT> values{};
 +bool initialised=false;
 +std::atomic<bool> dirty{false}; // set on the game thread, consumed by a save on any thread
 +
 +bool Valid(int32_t id) { return id>=0 && id<COUNT; }
++// Unknown until the render thread checked the GL extensions: shown meanwhile.
++std::atomic<int> msaaSupport{-1},anisoSupport{-1};
++
++// ---------------------------------------------------------------- device
++struct Device {
++    bool detected=false;
++    int ramMb=0,cores=0;
++};
++Device device;
++std::atomic<int> gpuTier{-1};
++std::atomic<int> adaptiveLevel{0};
++std::atomic<bool> adaptiveEnabled{true};
++
++void DetectDevice() {
++    if(device.detected) return;
++    device.detected=true;
++    struct sysinfo info{};
++    if(sysinfo(&info)==0) device.ramMb=int((uint64_t(info.totalram)*info.mem_unit)>>20);
++    device.cores=int(sysconf(_SC_NPROCESSORS_CONF));
++    GS_LOG("device: RAM %d MB, %d CPU cores",device.ramMb,device.cores);
++}
++
++// ---------------------------------------------------------------- tuning
++// Base look; ZyZGfx.ini overrides it. The menu percentages scale these.
++struct Tuning {
++    EglPostFX::Settings fx;
++    float bloom=0.8f,rays=0.5f,flare=0.09f,ssrScale=1.0f;
++    float shadowDarkness=0.55f;
++    bool loaded=false;
++};
++Tuning tuning;
++
++void LoadTuning() {
++    tuning=Tuning{};
++    auto& fx=tuning.fx;
++    // Built-in look matching the reference photos: soft filmic tone, mild
++    // contrast, sunlit haze, gentle eye adaptation.
++    fx.toneMix=0.5f;fx.exposure=1.0f;fx.saturation=1.02f;fx.contrast=0.95f;
++    if(!g_pszStorage) return;
++    char path[256];
++    std::snprintf(path,sizeof(path),"%sgraphics/ZyZGfx.ini",g_pszStorage);
++    ini_table_s* t=ini_table_create();
++    if(!ini_table_read_from_file(t,path)) { ini_table_destroy(t);GS_LOG("no %s, built-in look",path);return; }
++    auto has=[&](const char* s,const char* k) { return ini_table_check_entry(t,s,k); };
++    auto F=[&](const char* s,const char* k,float def) {
++        if(!has(s,k)) return def;
++        const float v=ini_table_get_entry_as_float(t,s,k,def);
++        return std::isfinite(v) ? v : def;
++    };
++    auto On=[&](const char* s) { return !has(s,"Enable") || F(s,"Enable",1.0f)!=0.0f; };
++
++    fx.toneMix=F("Post","Tonemap",fx.toneMix);
++    fx.exposure=F("Post","Exposure",fx.exposure);
++    fx.saturation=F("Post","Saturation",fx.saturation);
++    fx.contrast=F("Post","Contrast",fx.contrast);
++    if(has("Post","Sharpen")) fx.clarity=std::clamp(F("Post","Sharpen",0)*100.0f,0.0f,0.6f);
++    if(On("FSR") && has("FSR","Sharpness")) fx.clarity=std::max(fx.clarity,0.15f*F("FSR","Sharpness",0.8f));
++    fx.grain=F("Post","FilmGrain",fx.grain);
++    fx.dither=F("Post","Dither",fx.dither);
++    fx.gradeStrength=On("Grading") ? F("Grading","Strength",1.0f) : 0.0f;
++
++    // ZyZ uses HDR units (threshold 1.5 ~ our linear 0.70).
++    const float threshold=F("Bloom","Threshold",1.5f);
++    tuning.bloom=On("Bloom") ? 0.8f*F("Bloom","Intensity",0.6f)/0.6f : 0.0f;
++    fx.bloomThreshold=threshold*0.47f;
++    fx.bloomKnee=F("Bloom","SoftKnee",0.3f)*0.67f;
++    fx.nightThreshold=std::clamp(F("Bloom","NightThreshold",0.78f)/std::max(threshold,0.01f),0.1f,1.0f);
++    fx.nightGlow=F("Bloom","NightGlow",4.0f)/4.0f;
++
++    fx.autoExposure=On("AutoExposure") ? F("AutoExposure","Strength",fx.autoExposure) : 0.0f;
++    fx.aeKey=F("AutoExposure","Key",fx.aeKey);
++    fx.aeMin=F("AutoExposure","Min",fx.aeMin);
++    fx.aeMax=F("AutoExposure","Max",fx.aeMax);
++    fx.aeSpeed=F("AutoExposure","Speed",fx.aeSpeed);
++
++    const float rays=F("SunRays","Intensity",0.6f)/0.6f;
++    tuning.rays=On("SunRays") ? 0.5f*rays : 0.0f;
++    tuning.flare=On("SunRays") ? 0.09f*rays : 0.0f;
++    fx.rayLength=F("SunRays","Density",fx.rayLength);
++    fx.rayDecay=F("SunRays","Decay",fx.rayDecay);
++
++    if(On("Fog")) {
++        fx.hazeDensity=F("Fog","Density",fx.hazeDensity);
++        fx.hazeFalloff=F("Fog","HeightFalloff",fx.hazeFalloff);
++        fx.hazeBaseHeight=F("Fog","BaseHeight",fx.hazeBaseHeight);
++        fx.hazeUniform=F("Fog","HazeDensity",fx.hazeUniform);
++        fx.hazeStart=F("Fog","HazeStart",fx.hazeStart);
++        fx.hazeMax=F("Fog","MaxOpacity",fx.hazeMax);
++        fx.hazeFoggy=F("Fog","FoggyWeather",fx.hazeFoggy);
++    } else {
++        fx.hazeDensity=fx.hazeUniform=0.0f;
++    }
++
++    const char* folder=ini_table_get_entry(t,"LUT","Folder");
++    const char* file=ini_table_get_entry(t,"LUT","File");
++    if(file && *file) {
++        std::snprintf(fx.lutPath,sizeof(fx.lutPath),"%sgraphics/%s%s%s",g_pszStorage,
++                      folder ? folder : "",folder && *folder ? "/" : "",file);
++        fx.lutStrength=F("LUT","Strength",1.0f);
++    }
++
++    fx.aoStrength=0.65f*F("AO","Strength",1.0f);
++    fx.aoRadius=F("AO","Radius",1.5f)/1.5f;
++    tuning.shadowDarkness=std::clamp(F("Shadows","Strength",tuning.shadowDarkness),0.0f,0.85f);
++    tuning.ssrScale=On("SSR") ? F("SSR","Strength",1.0f) : 0.0f;
++    if(On("Wet")) {
++        fx.wetReflection=F("Wet","Reflection",1.0f);
++        fx.wetPuddles=F("Wet","Puddles",1.0f);
++        fx.wetRipples=F("Wet","Ripples",1.0f);
++        fx.wetForce=F("Wet","Force",0.0f);
++    } else {
++        fx.wetReflection=fx.wetPuddles=fx.wetRipples=0.0f;
++    }
++    tuning.loaded=true;
++    ini_table_destroy(t);
++    GS_LOG("loaded %s (sections HDR/TAA/Vehicle/Water/Lighting/Wind/Relief/Surfaces/Rain/"
++           "ExperimentalLights are not used by this client)",path);
++}
++
 +void LoadPreset(int32_t preset) {
 +    preset=std::clamp(preset,0,3);
 +    for(int32_t i=1;i<COUNT;++i) values[i]=kSpecs[i].preset[preset];
@@ -1257,6 +1913,54 @@ index 0000000..7014dfd
 +int32_t Get(int32_t id) { EnsureInitialised();return Valid(id) ? values[id] : 0; }
 +int32_t Min(int32_t id) { return Valid(id) ? kSpecs[id].min : 0; }
 +int32_t Max(int32_t id) { return Valid(id) ? kSpecs[id].max : 0; }
++bool Visible(int32_t id) {
++    if(id==MSAA) return msaaSupport.load()!=0;
++    if(id==ANISOTROPIC) return anisoSupport.load()!=0;
++    return Valid(id);
++}
++void SetMsaaSupport(bool supported) { msaaSupport.store(supported ? 1 : 0); }
++void SetAnisotropicSupport(bool supported) { anisoSupport.store(supported ? 1 : 0); }
++
++void SetGpu(const char* renderer) {
++    if(!renderer) return;
++    // Weak GPUs common in budget phones; mid-range ones get mid tier.
++    static constexpr const char* kLow[]={"Mali-T","Mali-4","Mali-G31","Mali-G51","Mali-G52","Mali-G57",
++        "PowerVR","Adreno (TM) 3","Adreno (TM) 4","Adreno (TM) 5","Adreno (TM) 610","Adreno (TM) 612",
++        "Adreno (TM) 613"};
++    static constexpr const char* kMid[]={"Mali-G68","Mali-G71","Mali-G72","Mali-G76","Mali-G77",
++        "Adreno (TM) 6"};
++    int tier=2;
++    for(const char* m:kMid) if(std::strstr(renderer,m)) tier=1;
++    for(const char* m:kLow) if(std::strstr(renderer,m)) tier=0;
++    gpuTier.store(tier);
++    GS_LOG("GPU %s -> tier %d (overall %d)",renderer,tier,Tier());
++}
++int Tier() {
++    DetectDevice();
++    int tier=2;
++    if(device.ramMb>0 && device.ramMb<3500) tier=0;
++    else if(device.ramMb>0 && device.ramMb<5500) tier=1;
++    if(device.cores>0 && device.cores<=4) tier=0;
++    const int gpu=gpuTier.load();
++    if(gpu>=0) tier=std::min(tier,gpu);
++    return tier;
++}
++bool LowMemory() { DetectDevice();return device.ramMb>0 && device.ramMb<3500; }
++int ShadowResolutionCap() {
++    DetectDevice();
++    if(device.ramMb>0 && device.ramMb<3500) return 1024;
++    if(device.ramMb>0 && device.ramMb<5500) return 2048;
++    return 4096;
++}
++bool AdaptiveEnabled() { return adaptiveEnabled.load(std::memory_order_relaxed); }
++// Same limit ApplyFPSPatch (game/patches.cpp) gives RsGlobal->maxFPS.
++int TargetFps() {
++    int fps=std::clamp(CSettings::m_Settings.iFPS,20,std::max(CSettings::maxFps,60));
++    if(CMobileSettings::ms_MobileSettings[MS_FrameLimiter].value!=0) fps=std::min(fps,30);
++    return fps;
++}
++int AdaptiveLevel() { return adaptiveLevel.load(std::memory_order_relaxed); }
++void SetAdaptiveLevel(int level) { adaptiveLevel.store(std::clamp(level,0,3),std::memory_order_relaxed); }
 +
 +void Set(int32_t id,int32_t value) {
 +    EnsureInitialised();
@@ -1275,7 +1979,7 @@ index 0000000..7014dfd
 +}
 +void ResetDefaults() {
 +    EnsureInitialised();
-+    LoadPreset(kDefaultPreset);
++    LoadPreset(Tier()>=2 ? 2 : kDefaultPreset);
 +    dirty=true;
 +    Apply();
 +}
@@ -1283,41 +1987,56 @@ index 0000000..7014dfd
 +
 +void Apply() {
 +    EnsureInitialised();
-+    // Post-processing: start from the system's own defaults so tuning that is
-+    // not exposed in the menu keeps the values chosen in EglPostFX.h.
-+    EglPostFX::Settings fx;
++    // Post-processing: the tuned base look (built-in or ZyZGfx.ini), then the
++    // menu toggles and strengths on top.
++    EglPostFX::Settings fx=tuning.fx;
 +    fx.enabled=values[POSTFX]!=0;
 +    fx.ssao=values[AMBIENT_OCCLUSION]!=0;
 +    fx.ssr=values[REFLECTIONS]!=0;
-+    fx.sunShafts=0.5f*Percent(SUN_RAYS);
-+    fx.lensFlare=0.09f*Percent(SUN_RAYS);
-+    fx.bloomStrength=0.8f*Percent(BLOOM);
++    fx.ssrStrength*=tuning.ssrScale;
++    fx.sunShafts=tuning.rays*Percent(SUN_RAYS);
++    fx.lensFlare=tuning.flare*Percent(SUN_RAYS);
++    fx.bloomStrength=tuning.bloom*Percent(BLOOM);
 +    fx.skyStrength=Percent(SKY);
 +    fx.wetStrength=Percent(WET_ROADS);
 +    fx.weatherLook=values[WEATHER_LOOK]!=0;
 +    fx.fogStrength=Percent(FOG);
 +    fx.fxaa=values[FXAA]!=0;
++    fx.motionBlur=Percent(MOTION_BLUR);
++    fx.dofStrength=Percent(DOF);
++    fx.lowMemory=LowMemory();
 +    EglPostFX::SetSettings(fx);
 +
 +    WorldSunShadow::Settings sun;
 +    sun.enabled=values[SUN_SHADOWS]!=0;
 +    static constexpr int kResolution[4]={512,1024,2048,4096};
 +    static constexpr float kSoftness[3]={0.6f,1.0f,1.8f};
-+    sun.resolution=kResolution[std::clamp(values[SHADOW_QUALITY],0,3)];
++    sun.resolution=std::min(kResolution[std::clamp(values[SHADOW_QUALITY],0,3)],ShadowResolutionCap());
 +    sun.radius=float(values[SHADOW_DISTANCE]);
 +    sun.softness=kSoftness[std::clamp(values[SOFT_SHADOWS],0,2)];
-+    // Larger maps cover more casters; the per-frame budget follows.
-+    sun.maxDraws=values[SHADOW_DISTANCE]>=100 ? 4000 : 3000;
++    sun.darkness=tuning.shadowDarkness;
++    // Every caster costs a second draw on the render thread: fewer on weak CPUs.
++    const int tier=Tier();
++    sun.maxDraws=tier==0 ? 1200 : (values[SHADOW_DISTANCE]>=100 ? 4000 : 3000);
 +    WorldSunShadow::SetSettings(sun);
 +
++    TextureFilter::SetLevel(values[ANISOTROPIC]);
++    WorldMsaa::SetLevel(values[MSAA]);
 +    CGame::ms_bUpdatePlants=values[GRASS]!=0;
++
++    adaptiveEnabled.store(values[ADAPTIVE]!=0);
++    if(values[ADAPTIVE]==0) adaptiveLevel.store(0);
 +}
 +
 +void Load(ini_table_s* config) {
 +    EnsureInitialised();
++    LoadTuning();
 +    if(config) {
-+        const int32_t preset=ini_table_get_entry_as_int(config,"graphics",kSpecs[PRESET].key,kDefaultPreset);
-+        LoadPreset(preset>=0 && preset<4 ? preset : kDefaultPreset);
++        // First start (no saved preset): the preset that fits this phone.
++        const int32_t fallback=Tier()>=2 ? 2 : kDefaultPreset;
++        const bool saved=ini_table_check_entry(config,"graphics",kSpecs[PRESET].key);
++        const int32_t preset=saved ? ini_table_get_entry_as_int(config,"graphics",kSpecs[PRESET].key,fallback) : fallback;
++        LoadPreset(preset>=0 && preset<4 ? preset : fallback);
 +        for(int32_t i=1;i<COUNT;++i)
 +            values[i]=std::clamp(ini_table_get_entry_as_int(config,"graphics",kSpecs[i].key,values[i]),
 +                                 kSpecs[i].min,kSpecs[i].max);
@@ -1334,21 +2053,26 @@ index 0000000..7014dfd
 +} // namespace GraphicsSettings
 diff --git a/graphics/GraphicsSettings.h b/graphics/GraphicsSettings.h
 new file mode 100644
-index 0000000..12f07da
+index 0000000..f05cfb3
 --- /dev/null
 +++ b/graphics/GraphicsSettings.h
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,77 @@
 +#pragma once
 +#include <cstdint>
 +
 +struct ini_table_s;
 +
 +// Options of the client's existing graphics system (EglPostFX, WorldSunShadow,
-+// CPlantMgr update), shown as extra rows in the GRAFIS tab of the existing
-+// ModernPauseMenu and stored in the existing settings.ini ([graphics]) through
-+// CSettings. Nothing here renders; Apply() only hands values to the systems.
++// CPlantMgr update, texture filtering, world MSAA), shown as extra rows in the
++// GRAFIS tab of the existing ModernPauseMenu and stored in the existing
++// settings.ini ([graphics]) through CSettings. Nothing here renders; Apply()
++// only hands values to the systems.
 +//
-+// All functions run on the game thread (CSettings load/save, ModernMenu
++// Optional tuning file: TESTLIT/graphics/ZyZGfx.ini (read once at start). It
++// sets the base look (tonemap, exposure, bloom, haze, LUT, ...); the menu
++// values scale/toggle on top of it.
++//
++// Set/Load/Save/Apply run on the game thread (CSettings load/save, ModernMenu
 +// request processing); the systems' own SetSettings are thread-safe.
 +namespace GraphicsSettings {
 +enum Id : int32_t {
@@ -1365,9 +2089,14 @@ index 0000000..12f07da
 +    SKY,               // realtime sky colour/glow, percent
 +    WET_ROADS,         // wet roads/puddles while raining, percent
 +    WEATHER_LOOK,      // grading/fog follow the weather in realtime
-+    FOG,               // percent
++    FOG,               // percent (weather fog and aerial haze)
 +    GRASS,             // procedural grass/plants follow the camera
 +    FXAA,              // anti-aliasing in the post-processing composite
++    MSAA,              // 0 off, 1 = 2x, 2 = 4x multisampling of the 3D world
++    MOTION_BLUR,       // camera motion blur, percent
++    DOF,               // depth of field (distance blur), percent
++    ANISOTROPIC,       // texture filtering: 0 off, 1 = 2x, 2 = 4x, 3 = 8x, 4 = 16x
++    ADAPTIVE,          // lower heavy effects automatically while the FPS is low
 +    COUNT
 +};
 +// Menu setting ids: GTA's MobileSettings use 0..MS_MAX-1 (37); these start here.
@@ -1377,6 +2106,8 @@ index 0000000..12f07da
 +int32_t Get(int32_t id);
 +int32_t Min(int32_t id);
 +int32_t Max(int32_t id);
++// False when this device cannot do the option (the menu hides the row).
++bool Visible(int32_t id);
 +// Clamps, applies live and marks the settings dirty. PRESET writes every
 +// value of that preset; changing any other value switches PRESET to Kustom.
 +void Set(int32_t id, int32_t value);
@@ -1387,6 +2118,21 @@ index 0000000..12f07da
 +// Called by CSettings::LoadSettings / CSettings::save with their ini table.
 +void Load(ini_table_s* config);
 +void Save(ini_table_s* config);
++
++// Device information (any thread). Tier: 0 low, 1 mid, 2 high.
++void SetMsaaSupport(bool supported);
++void SetAnisotropicSupport(bool supported);
++void SetGpu(const char* renderer); // render thread, GL_RENDERER
++int Tier();
++bool LowMemory();
++int ShadowResolutionCap();
++
++// Adaptive quality: the render thread measures the frame rate and sets a
++// level 0..3; WorldSunShadow/EglPostFX lower their heaviest work with it.
++bool AdaptiveEnabled();
++int TargetFps();
++int AdaptiveLevel();
++void SetAdaptiveLevel(int level);
 +} // namespace GraphicsSettings
 diff --git a/graphics/RenderThread.cpp b/graphics/RenderThread.cpp
 new file mode 100644
@@ -1618,20 +2364,427 @@ index 0000000..a3abd88
 +bool OnRenderThread();
 +
 +} // namespace GraphicsRenderThread
+diff --git a/graphics/TextureFilter.cpp b/graphics/TextureFilter.cpp
+new file mode 100644
+index 0000000..54dd496
+--- /dev/null
++++ b/graphics/TextureFilter.cpp
+@@ -0,0 +1,119 @@
++#include "TextureFilter.h"
++#include "GraphicsSettings.h"
++#include "RenderThread.h"
++#include "../modloader/HookScope.h"
++#include <GLES3/gl3.h>
++#include <android/log.h>
++#include <dlfcn.h>
++#include <algorithm>
++#include <atomic>
++#include <cstring>
++#include <mutex>
++#include <unordered_set>
++
++#define TF_LOG(...) __android_log_print(ANDROID_LOG_INFO, "GfxTextureFilter", __VA_ARGS__)
++
++namespace TextureFilter {
++namespace {
++constexpr GLenum kMaxAnisotropy = 0x84FE;      // GL_TEXTURE_MAX_ANISOTROPY_EXT
++constexpr GLenum kMaxAnisotropyLimit = 0x84FF; // GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
++
++using TexParameteriFn = void (GL_APIENTRYP)(GLenum, GLenum, GLint);
++TexParameteriFn originalTexParameteri = nullptr;
++
++std::atomic<int> g_support{-1};       // -1 unknown, 0 no, 1 yes
++std::atomic<float> g_deviceMax{1.0f};
++std::atomic<float> g_wanted{1.0f};    // requested samples (1 = off)
++std::atomic<int> g_level{0};
++// Render thread only: GTA textures that use mipmaps, for a level change.
++std::unordered_set<GLuint> g_mipTextures;
++
++bool IsMipmapFilter(GLint filter)
++{
++    return filter == GL_LINEAR_MIPMAP_LINEAR || filter == GL_LINEAR_MIPMAP_NEAREST ||
++           filter == GL_NEAREST_MIPMAP_LINEAR || filter == GL_NEAREST_MIPMAP_NEAREST;
++}
++
++float Effective()
++{
++    return std::clamp(g_wanted.load(std::memory_order_relaxed), 1.0f,
++                      g_deviceMax.load(std::memory_order_relaxed));
++}
++
++void GL_APIENTRY HookTexParameteri(GLenum target, GLenum pname, GLint param)
++{
++    ML_HOOK_SCOPE();
++    if (!originalTexParameteri) return;
++    originalTexParameteri(target, pname, param);
++    if (target != GL_TEXTURE_2D || pname != GL_TEXTURE_MIN_FILTER || !IsMipmapFilter(param)) return;
++    if (g_support.load(std::memory_order_relaxed) != 1) return;
++    if (!GraphicsRenderThread::OnRenderThread()) return; // GTA's context only
++    glTexParameterf(GL_TEXTURE_2D, kMaxAnisotropy, Effective());
++    GLint bound = 0;
++    glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
++    if (bound > 0) g_mipTextures.insert(static_cast<GLuint>(bound));
++}
++
++// Render thread: apply a new level to every mipmapped texture seen so far.
++void ApplyToKnownTextures(void*)
++{
++    if (g_support.load() != 1 || g_mipTextures.empty()) return;
++    GLint active = GL_TEXTURE0, bound = 0;
++    glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
++    glActiveTexture(GL_TEXTURE0);
++    glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
++    const float value = Effective();
++    for (auto it = g_mipTextures.begin(); it != g_mipTextures.end();) {
++        if (!glIsTexture(*it)) { it = g_mipTextures.erase(it); continue; }
++        glBindTexture(GL_TEXTURE_2D, *it);
++        glTexParameterf(GL_TEXTURE_2D, kMaxAnisotropy, value);
++        ++it;
++    }
++    glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(bound));
++    glActiveTexture(static_cast<GLenum>(active));
++}
++} // namespace
++
++bool InstallHooks(HookBackend backend)
++{
++    static std::once_flag once;
++    static bool installed = false;
++    std::call_once(once, [&] {
++        if (!backend) return;
++        void* gl = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL);
++        void* symbol = gl ? dlsym(gl, "glTexParameteri") : nullptr;
++        if (!symbol) { TF_LOG("glTexParameteri not found, anisotropic filtering off"); return; }
++        installed = backend(symbol, reinterpret_cast<void*>(&HookTexParameteri),
++                            reinterpret_cast<void**>(&originalTexParameteri)) && originalTexParameteri;
++        TF_LOG(installed ? "texture filter hook installed" : "texture filter hook failed");
++    });
++    return installed;
++}
++
++void CheckDevice()
++{
++    if (g_support.load() != -1) return;
++    bool supported = false;
++    GLint count = 0;
++    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
++    for (GLint i = 0; i < count && !supported; ++i) {
++        const char* name = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
++        supported = name && std::strcmp(name, "GL_EXT_texture_filter_anisotropic") == 0;
++    }
++    float limit = 1.0f;
++    if (supported) glGetFloatv(kMaxAnisotropyLimit, &limit);
++    g_deviceMax.store(std::max(1.0f, limit));
++    g_support.store(supported && limit > 1.0f ? 1 : 0);
++    GraphicsSettings::SetAnisotropicSupport(g_support.load() == 1);
++    TF_LOG("anisotropic filtering: %s (max %.0fx)", g_support.load() == 1 ? "yes" : "no", limit);
++}
++
++void SetLevel(int level)
++{
++    level = std::clamp(level, 0, 4);
++    static constexpr float kSamples[5] = {1.0f, 2.0f, 4.0f, 8.0f, 16.0f};
++    g_wanted.store(kSamples[level]);
++    if (g_level.exchange(level) == level) return;
++    if (GraphicsRenderThread::Ready()) GraphicsRenderThread::Enqueue(&ApplyToKnownTextures, nullptr);
++}
++} // namespace TextureFilter
+diff --git a/graphics/TextureFilter.h b/graphics/TextureFilter.h
+new file mode 100644
+index 0000000..a368d93
+--- /dev/null
++++ b/graphics/TextureFilter.h
+@@ -0,0 +1,19 @@
++#pragma once
++// Anisotropic filtering for GTA's world textures (GRAFIS "Filter anisotropic").
++//
++// libGTASA 2.10: RQ_Command_rqTextureMipMode (0x265860) binds the texture on
++// unit 5 and sets GL_TEXTURE_MIN_FILTER to GL_LINEAR_MIPMAP_LINEAR (0x2703) or
++// GL_LINEAR_MIPMAP_NEAREST (0x2701) with glTexParameteri. The hook adds
++// GL_TEXTURE_MAX_ANISOTROPY_EXT to that same bound texture right after it, only
++// when GL_EXT_texture_filter_anisotropic exists. Nothing else is changed.
++namespace TextureFilter {
++using HookBackend = void* (*)(void* symbol, void* replacement, void** original);
++
++// Called with the client's ShadowHook backend (EglPostFX::InstallHooks).
++bool InstallHooks(HookBackend backend);
++// Render thread, current GTA context: reads the extension and its maximum.
++void CheckDevice();
++// Game thread. level: 0 off, 1 = 2x, 2 = 4x, 3 = 8x, 4 = 16x. Textures that
++// already exist are updated on the render thread through the RenderQueue.
++void SetLevel(int level);
++} // namespace TextureFilter
+diff --git a/graphics/WorldMsaa.cpp b/graphics/WorldMsaa.cpp
+new file mode 100644
+index 0000000..c28f29e
+--- /dev/null
++++ b/graphics/WorldMsaa.cpp
+@@ -0,0 +1,209 @@
++#include "WorldMsaa.h"
++#include "GraphicsSettings.h"
++#include "RenderThread.h"
++#include "../modloader/HookScope.h"
++#include "../util/patch.h"
++#include <EGL/egl.h>
++#include <GLES3/gl3.h>
++#include <android/log.h>
++#include <dlfcn.h>
++#include <algorithm>
++#include <atomic>
++#include <cstdint>
++#include <cstring>
++#include <mutex>
++#include <vector>
++
++#define MSAA_LOG(...) __android_log_print(ANDROID_LOG_INFO, "GfxWorldMsaa", __VA_ARGS__)
++
++namespace WorldMsaa {
++namespace {
++constexpr GLenum kMaxSamplesExt = 0x8D57; // GL_MAX_SAMPLES_EXT
++
++using RenderbufferStorageFn = void (GL_APIENTRYP)(GLenum, GLenum, GLsizei, GLsizei);
++using FramebufferTexture2DFn = void (GL_APIENTRYP)(GLenum, GLenum, GLenum, GLuint, GLint);
++using RenderbufferStorageMsFn = void (GL_APIENTRYP)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
++using FramebufferTexture2DMsFn = void (GL_APIENTRYP)(GLenum, GLenum, GLenum, GLuint, GLint, GLsizei);
++RenderbufferStorageFn originalRenderbufferStorage = nullptr;
++FramebufferTexture2DFn originalFramebufferTexture2D = nullptr;
++RenderbufferStorageMsFn renderbufferStorageMs = nullptr;
++FramebufferTexture2DMsFn framebufferTexture2DMs = nullptr;
++void (*originalSetAltRenderTarget)(int, int) = nullptr;
++
++std::atomic<int> g_support{-1};     // -1 unknown, 0 no, 1 yes
++std::atomic<int> g_maxSamples{0};
++std::atomic<int> g_wanted{0};       // 0, 2 or 4 (game thread request)
++std::atomic<int> g_creating{0};     // samples while rqTargetCreate runs (render thread)
++
++// Render thread only, between BeginCreate and EndCreate.
++struct Storage { GLuint renderbuffer; GLenum format; GLsizei width, height; };
++std::vector<Storage> g_multisampled;
++bool g_colourAttached = false;
++
++bool Active()
++{
++    return g_creating.load(std::memory_order_relaxed) > 1 && GraphicsRenderThread::OnRenderThread();
++}
++
++void RevertRenderbuffers()
++{
++    if (g_multisampled.empty() || !originalRenderbufferStorage) return;
++    GLint previous = 0;
++    glGetIntegerv(GL_RENDERBUFFER_BINDING, &previous);
++    for (const Storage& s : g_multisampled) {
++        glBindRenderbuffer(GL_RENDERBUFFER, s.renderbuffer);
++        originalRenderbufferStorage(GL_RENDERBUFFER, s.format, s.width, s.height);
++    }
++    glBindRenderbuffer(GL_RENDERBUFFER, static_cast<GLuint>(previous));
++    g_multisampled.clear();
++}
++
++void Disable(const char* why)
++{
++    g_support.store(0);
++    GraphicsSettings::SetMsaaSupport(false);
++    MSAA_LOG("MSAA off for this device: %s", why);
++}
++
++void GL_APIENTRY HookRenderbufferStorage(GLenum target, GLenum format, GLsizei width, GLsizei height)
++{
++    ML_HOOK_SCOPE();
++    if (!originalRenderbufferStorage) return;
++    if (target == GL_RENDERBUFFER && Active() && renderbufferStorageMs) {
++        GLint renderbuffer = 0;
++        glGetIntegerv(GL_RENDERBUFFER_BINDING, &renderbuffer);
++        renderbufferStorageMs(target, g_creating.load(), format, width, height);
++        g_multisampled.push_back({static_cast<GLuint>(renderbuffer), format, width, height});
++        return;
++    }
++    originalRenderbufferStorage(target, format, width, height);
++}
++
++void GL_APIENTRY HookFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level)
++{
++    ML_HOOK_SCOPE();
++    if (!originalFramebufferTexture2D) return;
++    if (Active() && framebufferTexture2DMs && attachment == GL_COLOR_ATTACHMENT0 &&
++        textarget == GL_TEXTURE_2D && level == 0 && texture != 0) {
++        framebufferTexture2DMs(target, attachment, textarget, texture, level, g_creating.load());
++        if (glCheckFramebufferStatus(target) == GL_FRAMEBUFFER_COMPLETE) {
++            g_colourAttached = true;
++            return;
++        }
++        // Back to exactly what GTA asked for.
++        originalFramebufferTexture2D(target, attachment, textarget, texture, level);
++        RevertRenderbuffers();
++        Disable("world target incomplete with multisampling");
++        return;
++    }
++    originalFramebufferTexture2D(target, attachment, textarget, texture, level);
++}
++
++void BeginCreate(void* samples)
++{
++    g_multisampled.clear();
++    g_colourAttached = false;
++    g_creating.store(g_support.load() == 1 ? static_cast<int>(reinterpret_cast<intptr_t>(samples)) : 0);
++}
++
++void EndCreate(void*)
++{
++    // Multisampled depth without a multisampled colour texture (a target with
++    // a colour renderbuffer): keep everything single-sampled.
++    if (!g_colourAttached) RevertRenderbuffers();
++    else MSAA_LOG("world target created with %dx MSAA", g_creating.load());
++    g_multisampled.clear();
++    g_colourAttached = false;
++    g_creating.store(0);
++}
++
++void SetAltRenderTarget_hook(int width, int height)
++{
++    ML_HOOK_SCOPE();
++    if (!originalSetAltRenderTarget) return;
++    static int applied = 0;
++    static bool haveTarget = false;
++    // Until CheckDevice ran (support unknown) the target stays single-sampled;
++    // once MSAA is known to work, wanted != applied recreates it once.
++    const int wanted = g_support.load() == 1 ? g_wanted.load() : 0;
++    if (width > 0 && height > 0 && haveTarget && wanted != applied) {
++        originalSetAltRenderTarget(0, 0); // GTA's own delete path (screen fade)
++        haveTarget = false;
++    }
++    bool armed = false;
++    if (wanted > 1 && width > 0 && height > 0 && !haveTarget && GraphicsRenderThread::Ready())
++        armed = GraphicsRenderThread::Enqueue(&BeginCreate, reinterpret_cast<void*>(static_cast<intptr_t>(wanted)));
++    originalSetAltRenderTarget(width, height);
++    if (armed && !GraphicsRenderThread::Enqueue(&EndCreate, nullptr))
++        GraphicsRenderThread::Enqueue(&EndCreate, nullptr);
++    if (width > 0 && height > 0) {
++        if (!haveTarget) applied = armed ? wanted : 0;
++        haveTarget = true;
++    } else {
++        haveTarget = false;
++    }
++}
++} // namespace
++
++bool InstallHooks(HookBackend backend)
++{
++    static std::once_flag once;
++    static bool installed = false;
++    std::call_once(once, [&] {
++        if (!backend) return;
++        void* gl = dlopen("libGLESv2.so", RTLD_NOW | RTLD_LOCAL);
++        void* storage = gl ? dlsym(gl, "glRenderbufferStorage") : nullptr;
++        void* attach = gl ? dlsym(gl, "glFramebufferTexture2D") : nullptr;
++        if (!storage || !attach || storage == attach) { MSAA_LOG("GL symbols missing, MSAA off"); return; }
++        if (!backend(storage, reinterpret_cast<void*>(&HookRenderbufferStorage),
++                     reinterpret_cast<void**>(&originalRenderbufferStorage)) || !originalRenderbufferStorage) {
++            MSAA_LOG("glRenderbufferStorage hook failed, MSAA off");
++            return;
++        }
++        if (!backend(attach, reinterpret_cast<void*>(&HookFramebufferTexture2D),
++                     reinterpret_cast<void**>(&originalFramebufferTexture2D)) || !originalFramebufferTexture2D) {
++            MSAA_LOG("glFramebufferTexture2D hook failed, MSAA off");
++            return;
++        }
++        CHook::InlineHook("_Z22emu_SetAltRenderTargetii", &SetAltRenderTarget_hook, &originalSetAltRenderTarget);
++        installed = originalSetAltRenderTarget != nullptr;
++        MSAA_LOG(installed ? "world MSAA hooks installed" : "emu_SetAltRenderTarget hook failed, MSAA off");
++    });
++    return installed;
++}
++
++void CheckDevice()
++{
++    if (g_support.load() != -1) return;
++    bool extension = false;
++    GLint count = 0;
++    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
++    for (GLint i = 0; i < count && !extension; ++i) {
++        const char* name = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
++        extension = name && std::strcmp(name, "GL_EXT_multisampled_render_to_texture") == 0;
++    }
++    if (extension) {
++        renderbufferStorageMs = reinterpret_cast<RenderbufferStorageMsFn>(
++            eglGetProcAddress("glRenderbufferStorageMultisampleEXT"));
++        framebufferTexture2DMs = reinterpret_cast<FramebufferTexture2DMsFn>(
++            eglGetProcAddress("glFramebufferTexture2DMultisampleEXT"));
++    }
++    GLint maxSamples = 0;
++    if (extension) glGetIntegerv(kMaxSamplesExt, &maxSamples);
++    const bool ok = extension && renderbufferStorageMs && framebufferTexture2DMs && maxSamples >= 2 &&
++                    originalSetAltRenderTarget;
++    g_maxSamples.store(maxSamples);
++    g_support.store(ok ? 1 : 0);
++    GraphicsSettings::SetMsaaSupport(ok);
++    MSAA_LOG("EXT_multisampled_render_to_texture: %s (max %d samples)", ok ? "yes" : "no", maxSamples);
++}
++
++void SetLevel(int level)
++{
++    level = std::clamp(level, 0, 2);
++    int samples = level == 0 ? 0 : (level == 1 ? 2 : 4);
++    const int limit = g_maxSamples.load();
++    if (limit > 0) samples = std::min(samples, limit);
++    g_wanted.store(samples >= 2 ? samples : 0);
++}
++} // namespace WorldMsaa
+diff --git a/graphics/WorldMsaa.h b/graphics/WorldMsaa.h
+new file mode 100644
+index 0000000..c719ca1
+--- /dev/null
++++ b/graphics/WorldMsaa.h
+@@ -0,0 +1,23 @@
++#pragma once
++// MSAA for the 3D world (GRAFIS "MSAA"), in GTA's own world render target.
++//
++// libGTASA 2.10: Idle() calls emu_SetAltRenderTarget(w, h) (0x24eb68), which
++// creates the world target with RQRenderTarget::Create (0x265d88) -> RQ command
++// 26, RQ_Command_rqTargetCreate (0x2663f8): a depth renderbuffer
++// (glRenderbufferStorage) and a colour texture (glFramebufferTexture2D). While
++// THAT command runs, the two calls are replaced with their
++// GL_EXT_multisampled_render_to_texture versions (tile-local MSAA, resolved for
++// free when the target is sampled by emu_FlushAltRenderTarget). If the target
++// is not complete afterwards, the normal single-sample storage is put back
++// and MSAA is switched off for this device. A changed sample count recreates
++// the target through GTA's own path (emu_SetAltRenderTarget(0, 0), as during
++// a screen fade).
++namespace WorldMsaa {
++using HookBackend = void* (*)(void* symbol, void* replacement, void** original);
++
++bool InstallHooks(HookBackend backend);
++// Render thread, current GTA context.
++void CheckDevice();
++// Game thread. level: 0 off, 1 = 2x, 2 = 4x.
++void SetLevel(int level);
++} // namespace WorldMsaa
 diff --git a/graphics/postfx/EglPostFX.cpp b/graphics/postfx/EglPostFX.cpp
-index 1241bfe..1076ea2 100644
+index 1241bfe..1cd5553 100644
 --- a/graphics/postfx/EglPostFX.cpp
 +++ b/graphics/postfx/EglPostFX.cpp
-@@ -3,6 +3,8 @@
+@@ -3,6 +3,12 @@
  #include "LookProfile.h"
  #include "ShaderSources.h"
  #include "../sun/WorldSunShadow.h"
 +#include "../RenderThread.h"
++#include "../GraphicsSettings.h"
++#include "../TextureFilter.h"
++#include "../WorldMsaa.h"
 +#include "../../modloader/HookScope.h"
++#include "../../vendor/imgui/stb_image.h" // implementation compiled in main.cpp
  #include <EGL/egl.h>
  #include <EGL/eglext.h>
  #include <GLES3/gl3.h>
-@@ -40,15 +42,21 @@ DestroyContextFn realDestroyContext=nullptr;
+@@ -24,7 +30,7 @@
+ #define FX_LOG(...) __android_log_print(ANDROID_LOG_INFO,"EglPostFX",__VA_ARGS__)
+ namespace EglPostFX {
+ namespace {
+-constexpr unsigned kUnits=8;
++constexpr unsigned kUnits=12;
+ constexpr GLenum kSRGBWrite=0x8DB9; // GL_FRAMEBUFFER_SRGB_EXT.
+ using SwapFn=EGLBoolean(EGLAPIENTRY*)(EGLDisplay,EGLSurface);
+ using DamageFn=EGLBoolean(EGLAPIENTRY*)(EGLDisplay,EGLSurface,const EGLint*,EGLint);
+@@ -40,15 +46,21 @@ DestroyContextFn realDestroyContext=nullptr;
  DestroySurfaceFn realDestroySurface=nullptr;
  ReleaseFn realReleaseThread=nullptr;
  GetProcFn realGetProc=nullptr;
@@ -1656,13 +2809,14 @@ index 1241bfe..1076ea2 100644
  
  template<class T> T Proc(const char* name) {
      return reinterpret_cast<T>(realGetProc ? realGetProc(name) : eglGetProcAddress(name));
-@@ -171,14 +179,16 @@ enum Uniform { Source,Texel,Decode,Extract,ThresholdKnee,Direction,Scene,Depth,
+@@ -171,14 +183,19 @@ enum Uniform { Source,Texel,Decode,Extract,ThresholdKnee,Direction,Scene,Depth,
      Projection,InvProjection,DepthRange,ClearDepth,ForwardSign,SSR,AO,SSRParams,
      AOParams,Bloom0,Bloom1,Bloom2,Effects,Dirt,HasDepth,Encode,Grade,BloomDirt,
      EffectSize,LightCount,LightPosition,LightColor,Time,Aspect,Detail,ShadowTint,
 -    HighlightTint,Fog,Sun,Atmosphere,UniformCount };
 +    HighlightTint,Fog,Sun,Atmosphere,InvView,SunDirection,SkyZenith,SkyHorizon,SunColor,
-+    Wet,DepthTexel,FXAA,UniformCount };
++    Wet,DepthTexel,FXAA,State,DofTex,LUT,Haze,HazeBase,AutoExposure,Dof,Motion,
++    PrevViewProj,Lut,Finish,Rays,Adapt,Focus,UniformCount };
  constexpr const char* uniformNames[]={"uSource","uTexel","uDecodeSRGB","uExtract",
      "uThresholdKnee","uDirection","uScene","uDepth","uProjection","uInvProjection",
      "uDepthRange","uClearDepth","uForwardSign","uSSR","uAO","uSSRParams","uAOParams",
@@ -1671,11 +2825,13 @@ index 1241bfe..1076ea2 100644
      "uLightColor[0]","uTime","uAspect","uDetail","uShadowTint","uHighlightTint",
 -    "uFog","uSun","uAtmosphere"};
 +    "uFog","uSun","uAtmosphere","uInvView","uSunDirection","uSkyZenith","uSkyHorizon",
-+    "uSunColor","uWet","uDepthTexel","uFXAA"};
++    "uSunColor","uWet","uDepthTexel","uFXAA","uState","uDofTex","uLUT","uHaze",
++    "uHazeBase","uAutoExposure","uDof","uMotion","uPrevViewProj","uLut","uFinish","uRays",
++    "uAdapt","uFocus"};
  static_assert(sizeof(uniformNames)/sizeof(uniformNames[0])==UniformCount);
  struct Program {
      GLuint id=0;GLint location[UniformCount]{};
-@@ -236,12 +246,32 @@ struct Target {
+@@ -236,28 +253,58 @@ struct Target {
          return true;
      }
  };
@@ -1708,7 +2864,71 @@ index 1241bfe..1076ea2 100644
      EGLSurface gameSurface=EGL_NO_SURFACE; // Hanya diakses thread pemilik context.
      GLuint vao=0,dirt=0,depthTexture=0;
      int width=0,height=0;GLenum colorFormat=0,depthFormat=0;
-@@ -356,7 +386,10 @@ void CleanupCurrent() {
+     Target scene,bloom[3],ping[3],effects,atmosphere;
+-    Program downsample,blur,depthEffects,composite,atmosphereProgram;
++    Target state[2],dof;          // 1x1 frame state (exposure, focus), half-res DOF source
++    Program downsample,blur,depthEffects,composite,atmosphereProgram,stateProgram;
++    int stateIndex=0;bool stateValid=false,lowMemoryTargets=false;
++    std::chrono::steady_clock::time_point stateTime{};
++    GLuint lut=0;int lutSize=0;char lutLoaded[192]{};bool lutTried=false;
++    // Motion blur: previous frame camera (world -> clip) and eye/forward for cut detection.
++    float prevViewProj[16]{},prevEye[3]{},prevForward[3]{};bool havePrev=false,motionActive=false;
++    float motionPrev[16]{};
+     float projection[16]{},inverse[16]{},depthRange[2]{0,1},clearDepth=1,forwardSign=-1;
+     void DestroyTargets() {
+         // Scene FBO owns an attachment reference: delete it before the depth texture.
+         scene.Destroy();for(auto& x:bloom) x.Destroy();for(auto& x:ping) x.Destroy();effects.Destroy();
+-        atmosphere.Destroy();
++        atmosphere.Destroy();state[0].Destroy();state[1].Destroy();dof.Destroy();
++        stateValid=false;havePrev=false;
+         if(depthTexture) glDeleteTextures(1,&depthTexture);
+         depthTexture=0;depthFormat=0;width=height=0;
+     }
+     void Destroy() {
+         DestroyTargets();downsample.Destroy();blur.Destroy();depthEffects.Destroy();composite.Destroy();
+-        atmosphereProgram.Destroy();compat.Destroy();
++        atmosphereProgram.Destroy();stateProgram.Destroy();compat.Destroy();
++        if(lut) glDeleteTextures(1,&lut);
++        lut=0;lutSize=0;lutLoaded[0]=0;lutTried=false;
+         if(vao) glDeleteVertexArrays(1,&vao);if(dirt) glDeleteTextures(1,&dirt);
+         vao=dirt=0;ready=false;processedBeforeHud=false;
+     }
+@@ -266,7 +313,7 @@ struct ContextState {
+         if(!vs) return false;
+         const bool ok=Link(downsample,vs,Shaders::kDownsample) && Link(blur,vs,Shaders::kBlur)
+             && Link(depthEffects,vs,Shaders::kDepthEffects) && Link(composite,vs,Shaders::kComposite)
+-            && Link(atmosphereProgram,vs,Shaders::kAtmosphere);
++            && Link(atmosphereProgram,vs,Shaders::kAtmosphere) && Link(stateProgram,vs,Shaders::kState);
+         glDeleteShader(vs);
+         if(!ok) return false;
+         glGenVertexArrays(1,&vao);
+@@ -292,10 +339,11 @@ struct ContextState {
+         glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
+         ready=true;return vao!=0 && dirt!=0;
+     }
+-    bool Targets(int w,int h,GLenum color) {
+-        if(width==w && height==h && colorFormat==color && scene.fbo) return true;
+-        DestroyTargets();width=w;height=h;colorFormat=color;
+-        const GLenum working=caps.halfFloat ? GL_RGBA16F : GL_RGBA8;
++    bool Targets(int w,int h,GLenum color,bool lowMemory) {
++        if(width==w && height==h && colorFormat==color && lowMemoryTargets==lowMemory && scene.fbo) return true;
++        DestroyTargets();width=w;height=h;colorFormat=color;lowMemoryTargets=lowMemory;
++        // Low-RAM phones: 8-bit bloom chain (half the memory and bandwidth).
++        const GLenum working=caps.halfFloat && !lowMemory ? GL_RGBA16F : GL_RGBA8;
+         if(!scene.Create(w,h,color)) return false;
+         for(int i=0;i<3;++i) {
+             int bw=std::max(1,w>>(i+1)),bh=std::max(1,h>>(i+1));
+@@ -303,6 +351,9 @@ struct ContextState {
+         }
+         if(!effects.Create(std::max(1,w/2),std::max(1,h/2),working)) return false;
+         if(!atmosphere.Create(std::max(1,w/4),std::max(1,h/4),working)) return false;
++        // State is stored normalised (0..1), so 8-bit works too.
++        if(!state[0].Create(1,1,working) || !state[1].Create(1,1,working)) return false;
++        if(!dof.Create(std::max(1,w>>1),std::max(1,h>>1),working)) return false;
+         FX_LOG("FBO %dx%d, bloom=%s",w,h,caps.halfFloat ? "RGBA16F" : "RGBA8");
+         return true;
+     }
+@@ -356,7 +407,10 @@ void CleanupCurrent() {
  void Retire(EGLDisplay d,EGLContext c) {
      WorldSunShadow::Retire(d,c);
      std::lock_guard<std::mutex> lock(statesMutex);
@@ -1720,7 +2940,7 @@ index 1241bfe..1076ea2 100644
  }
  bool ReadProjection(GLuint program,float* projection) {
      if(!program) return false;
-@@ -427,24 +460,30 @@ void BloomPasses(ContextState& s,const Settings& cfg,bool decode) {
+@@ -427,24 +481,85 @@ void BloomPasses(ContextState& s,const Settings& cfg,bool decode) {
          input=s.bloom[i].texture;iw=s.bloom[i].width;ih=s.bloom[i].height;
      }
  }
@@ -1749,24 +2969,85 @@ index 1241bfe..1076ea2 100644
 +    glUniform1i(p[Scene],0);glUniform1i(p[Depth],1);glUniform1i(p[HasDepth],depth!=0);
 +    glUniform1f(p[ClearDepth],s.clearDepth);
 +    glUniform1i(p[Decode],decode);glUniform4fv(p[Sun],1,look.sun);
++    glUniform2f(p[Rays],look.config.rayLength,look.config.rayDecay);
      glUniform2f(p[Texel],1.0f/s.width,1.0f/s.height);glUniform1f(p[Aspect],float(s.width)/s.height);Draw();
  }
 -void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decode,bool encode) {
++// Colour LUT strip (size*size x size PNG, e.g. 256x16 / 1024x32 / 4096x64) from
++// TESTLIT/graphics/<Folder>/<File>. Loaded once per path on the render thread.
++void EnsureLut(ContextState& s,const Settings& cfg) {
++    if(s.lutTried && std::strncmp(cfg.lutPath,s.lutLoaded,sizeof(s.lutLoaded))==0) return;
++    s.lutTried=true;std::strncpy(s.lutLoaded,cfg.lutPath,sizeof(s.lutLoaded)-1);
++    if(s.lut) glDeleteTextures(1,&s.lut);
++    s.lut=0;s.lutSize=0;
++    if(!cfg.lutPath[0]) return;
++    int w=0,h=0,n=0;
++    unsigned char* pixels=stbi_load(cfg.lutPath,&w,&h,&n,3);
++    if(!pixels) { FX_LOG("LUT not loaded: %s",cfg.lutPath);return; }
++    if(h<2 || h>64 || w!=h*h) {
++        FX_LOG("LUT %s is %dx%d; expected size*size x size (256x16, 1024x32, 4096x64)",cfg.lutPath,w,h);
++        stbi_image_free(pixels);return;
++    }
++    glGenTextures(1,&s.lut);glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,s.lut);
++    glTexImage2D(GL_TEXTURE_2D,0,GL_RGB8,w,h,0,GL_RGB,GL_UNSIGNED_BYTE,pixels);
++    stbi_image_free(pixels);
++    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_S,GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_WRAP_T,GL_CLAMP_TO_EDGE);
++    s.lutSize=h;
++    FX_LOG("LUT loaded: %s (%d)",cfg.lutPath,h);
++}
++// 1x1 state: eye adaptation and the auto-focus distance, eased over time.
++void StatePass(ContextState& s,const Settings& cfg,bool decode,GLuint depth) {
++    const auto now=std::chrono::steady_clock::now();
++    const float dt=s.stateValid ? std::clamp(std::chrono::duration<float>(now-s.stateTime).count(),0.0f,0.5f) : 0.0f;
++    s.stateTime=now;
++    const int write=s.stateIndex^1;
++    const Program& p=s.stateProgram;Begin(s.state[write],p);
++    Texture(0,s.scene.texture);Texture(1,depth ? depth : s.scene.texture);Texture(2,s.state[s.stateIndex].texture);
++    glUniform1i(p[Scene],0);glUniform1i(p[Depth],1);glUniform1i(p[Source],2);
++    glUniform1i(p[HasDepth],depth!=0);glUniform1i(p[Decode],decode);
++    glUniform1f(p[ClearDepth],s.clearDepth);glUniform2fv(p[DepthRange],1,s.depthRange);
++    glUniformMatrix4fv(p[InvProjection],1,GL_FALSE,s.inverse);
++    const float exposureK=s.stateValid ? 1.0f-std::exp(-dt*cfg.aeSpeed) : 1.0f;
++    const float focusK=s.stateValid ? 1.0f-std::exp(-dt*3.0f) : 1.0f;
++    glUniform4f(p[Adapt],cfg.aeKey,cfg.aeMin,cfg.aeMax,exposureK);
++    glUniform4f(p[Focus],focusK,30.0f,0.0f,0.0f);Draw();
++    s.stateIndex=write;s.stateValid=true;
++}
++// Half-resolution blurred copy of the scene for depth of field.
++void DofPass(ContextState& s,bool decode) {
++    Begin(s.dof,s.downsample);Texture(0,s.scene.texture);
++    glUniform1i(s.downsample[Source],0);glUniform2f(s.downsample[Texel],1.0f/s.width,1.0f/s.height);
++    glUniform1i(s.downsample[Decode],decode);glUniform1i(s.downsample[Extract],0);
++    glUniform2f(s.downsample[ThresholdKnee],1.0f,0.2f);Draw();
++    Begin(s.ping[0],s.blur);Texture(0,s.dof.texture);
++    glUniform1i(s.blur[Source],0);glUniform2f(s.blur[Direction],1.6f/s.dof.width,0);Draw();
++    Begin(s.dof,s.blur);Texture(0,s.ping[0].texture);
++    glUniform2f(s.blur[Direction],0,1.6f/s.dof.height);Draw();
++}
 +void CompositePass(ContextState& s,const LookProfile& look,GLuint depthTexture,int dw,int dh,bool decode,bool encode) {
 +    const bool depth=depthTexture!=0;
      const auto& cfg=look.config;
      glBindFramebuffer(GL_DRAW_FRAMEBUFFER,0);
      GLint oldDraw=GL_BACK;glGetIntegerv(GL_DRAW_BUFFER0,&oldDraw);
-@@ -452,7 +491,7 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
+@@ -452,8 +567,13 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
      glViewport(0,0,s.width,s.height);const Program& p=s.composite;glUseProgram(p.id);
      Texture(0,s.scene.texture);Texture(1,s.bloom[0].texture);Texture(2,s.bloom[1].texture);
      Texture(3,s.bloom[2].texture);Texture(4,s.effects.texture);
 -    Texture(5,depth ? s.depthTexture : s.scene.texture);Texture(6,s.dirt);
 +    Texture(5,depth ? depthTexture : s.scene.texture);Texture(6,s.dirt);
      Texture(7,s.atmosphere.texture);glUniform1i(p[Atmosphere],7);
++    const bool dofActive=depth && cfg.dofStrength>0.0f && s.stateValid;
++    const bool lutActive=s.lut!=0 && cfg.lutStrength>0.0f;
++    Texture(8,s.state[s.stateIndex].texture);Texture(9,dofActive ? s.dof.texture : s.scene.texture);
++    Texture(10,lutActive ? s.lut : s.scene.texture);
++    glUniform1i(p[State],8);glUniform1i(p[DofTex],9);glUniform1i(p[LUT],10);
      glUniform1i(p[Scene],0);glUniform1i(p[Bloom0],1);glUniform1i(p[Bloom1],2);
      glUniform1i(p[Bloom2],3);glUniform1i(p[Effects],4);glUniform1i(p[Depth],5);glUniform1i(p[Dirt],6);
-@@ -464,6 +503,18 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
+     glUniform1i(p[HasDepth],depth);glUniform1i(p[Decode],decode);glUniform1i(p[Encode],encode);
+@@ -464,6 +584,26 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
      glUniform2f(p[BloomDirt],cfg.bloomStrength,cfg.dirtStrength);
      glUniform2f(p[EffectSize],float(s.effects.width),float(s.effects.height));
      glUniform2fv(p[DepthRange],1,s.depthRange);glUniformMatrix4fv(p[InvProjection],1,GL_FALSE,s.inverse);
@@ -1782,14 +3063,30 @@ index 1241bfe..1076ea2 100644
 +    glUniform4fv(p[Wet],1,world ? look.wet : zero);
 +    glUniform2f(p[DepthTexel],1.0f/float(std::max(dw,1)),1.0f/float(std::max(dh,1)));
 +    glUniform1i(p[FXAA],cfg.fxaa ? 1 : 0);
++    glUniform4fv(p[Haze],1,world ? look.haze : zero);
++    glUniform4fv(p[HazeBase],1,world ? look.hazeBase : zero);
++    glUniform4f(p[AutoExposure],s.stateValid ? cfg.autoExposure : 0.0f,0,0,0);
++    glUniform4f(p[Dof],dofActive ? cfg.dofStrength : 0.0f,0,0,0);
++    glUniform4f(p[Motion],cfg.motionBlur,0.035f,6.0f,world && s.motionActive && cfg.motionBlur>0.0f ? 1.0f : 0.0f);
++    glUniformMatrix4fv(p[PrevViewProj],1,GL_FALSE,s.motionPrev);
++    glUniform4f(p[Lut],cfg.lutStrength,float(std::max(s.lutSize,2)),0,lutActive ? 1.0f : 0.0f);
++    glUniform4f(p[Finish],cfg.grain,cfg.dither,cfg.gradeStrength,0);
      float positions[16]{},colors[16]{};
      for(int i=0;i<cfg.lightCount;++i) {
          const auto& l=cfg.lights[static_cast<size_t>(i)];
-@@ -478,6 +529,67 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
+@@ -478,6 +618,80 @@ void CompositePass(ContextState& s,const LookProfile& look,bool depth,bool decod
      const GLenum restore=static_cast<GLenum>(oldDraw);glDrawBuffers(1,&restore);
  }
  
 +
++// Effects dropped first when the adaptive level rises (render thread).
++Settings AdaptiveSettings(Settings c) {
++    const int level=GraphicsSettings::AdaptiveLevel();
++    if(level>=1) { c.ssao=false;c.ssr=false;c.motionBlur=0;c.dofStrength=0; }
++    if(level>=2) { c.sunShafts*=0.5f;c.lensFlare*=0.5f;c.clarity=0; }
++    if(level>=3) { c.autoExposure=0;c.lutStrength=0; }
++    return c;
++}
 +FrameEnvironment CurrentEnvironment() {
 +    std::lock_guard<std::mutex> lock(environmentMutex);return frameEnvironment;
 +}
@@ -1822,9 +3119,14 @@ index 1241bfe..1076ea2 100644
 +        else if(m.initialised) { e.sunUV[0]=m.environment.sunUV[0];e.sunUV[1]=m.environment.sunUV[1]; }
 +        onScreen*=weight;
 +    }
-+    const WeatherTraits traits=EnvironmentTraits(e);
-+    const float target=onScreen*Unit(0.3f+0.7f*(e.oldWeather<0&&e.newWeather<0 ? 0.8f : traits.clear))
-+        *(1.0f-0.75f*e.cloud)*Smooth(-0.02f,0.08f,e.toSun[2]);
++    // traits.clear already encodes cloudy/rainy weather; CloudCoverage is 1.0
++    // for most weathers (CWeather::Update), so it only trims a little now
++    // (it was counted twice: sun rays/glow vanished in almost every weather).
++    const bool followWeather=GetSettings().weatherLook;
++    const WeatherTraits traits=followWeather ? EnvironmentTraits(e) : WeatherTraits{};
++    const float clear=followWeather && !(e.oldWeather<0&&e.newWeather<0) ? traits.clear : 0.8f;
++    const float target=onScreen*Unit(0.3f+0.7f*clear)
++        *(1.0f-(followWeather ? 0.30f : 0.0f)*e.cloud)*Smooth(-0.02f,0.08f,e.toSun[2]);
 +    const auto now=std::chrono::steady_clock::now();
 +    if(!m.initialised) {
 +        m.initialised=true;m.last=now;m.environment=e;m.traits=traits;m.sunVisibility=target;
@@ -1853,7 +3155,7 @@ index 1241bfe..1076ea2 100644
  bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* suppliedProjection) {
      if(!installed.load() || eglGetCurrentContext()==EGL_NO_CONTEXT ||
         eglGetCurrentDisplay()!=display || eglGetCurrentSurface(EGL_DRAW)!=surface) return false;
-@@ -486,19 +598,33 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -486,19 +700,33 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
      auto state=CurrentState(beforeHud);
      if(!state || state->retiring.load()) return false;
      ContextState& s=*state;
@@ -1867,7 +3169,7 @@ index 1241bfe..1076ea2 100644
 +    WorldSunShadow::WorldView world;
 +    const bool haveWorld=beforeHud && WorldSunShadow::GetWorldView(world);
 +    if(beforeHud) UpdateEnvironment(s,CurrentEnvironment(),haveWorld ? &world : nullptr);
-+    const LookProfile look=BuildLook(GetSettings(),s.environment,s.smooth.traits,s.smooth.sunVisibility);
++    const LookProfile look=BuildLook(AdaptiveSettings(GetSettings()),s.environment,s.smooth.traits,s.smooth.sunVisibility);
      const Settings& cfg=look.config;if(!cfg.enabled) return false;
 +    const unsigned generation=settingsGeneration.load(std::memory_order_relaxed);
 +    if(s.settingsSeen!=generation) { s.settingsSeen=generation;s.retryFrames=0;s.setupFailures=0;s.failed=false; }
@@ -1895,7 +3197,7 @@ index 1241bfe..1076ea2 100644
      EGLint w=0,h=0;
      if(!eglQuerySurface(display,surface,EGL_WIDTH,&w) || !eglQuerySurface(display,surface,EGL_HEIGHT,&h) || w<2 || h<2) return false;
      if(!s.checked) {
-@@ -507,14 +633,16 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -507,14 +735,16 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
                 s.caps.es3 ? "GLES3 + optional depth" : "GLES2 color compatibility");
      }
      if(!s.caps.es2 || s.failed || (s.caps.es3 && UnsafeDrawState())) return false;
@@ -1917,7 +3219,7 @@ index 1241bfe..1076ea2 100644
              s.reportedFallback=true;
          }
          return false;
-@@ -526,7 +654,12 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -526,7 +756,12 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
          EGLint colorSpace=0;
          if(extensions && std::strstr(extensions,"EGL_KHR_gl_colorspace"))
              eglQuerySurface(display,surface,0x309D,&colorSpace);
@@ -1931,7 +3233,7 @@ index 1241bfe..1076ea2 100644
          if(rendered && beforeHud) s.processedBeforeHud=true;
          return rendered;
      }
-@@ -542,39 +675,67 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
+@@ -542,39 +777,90 @@ bool Render(EGLDisplay display,EGLSurface surface,bool beforeHud,const float* su
         (defaultDraw!=GL_BACK && defaultDraw!=GL_NONE)) return false;
      bool srgb=false;GLenum color=DefaultColor(srgb);if(!color) return false;
      GLint samples=0;glGetIntegerv(GL_SAMPLES,&samples);
@@ -1939,7 +3241,7 @@ index 1241bfe..1076ea2 100644
 -    bool hasDepth=false;
 -    if(beforeHud && depthFormat && (cfg.ssr || cfg.ssao || cfg.fogStrength>0)) {
 +    const bool wantDepth=cfg.ssr || cfg.ssao || cfg.fogStrength>0 || cfg.skyStrength>0
-+        || cfg.wetStrength>0 || cfg.sunShafts>0;
++        || cfg.wetStrength>0 || cfg.sunShafts>0 || cfg.motionBlur>0 || cfg.dofStrength>0;
 +    GLuint depthTexture=0;int depthWidth=w,depthHeight=h;
 +    s.haveView=false;
 +    if(beforeHud && wantDepth && haveWorld) {
@@ -1974,7 +3276,7 @@ index 1241bfe..1076ea2 100644
 +        FX_LOG("PostFX shaders failed %ux%s",s.setupFailures,s.failed ? ", disabled" : ", retry in 120 frames");
 +        return false;
 +    }
-+    if(!s.Targets(w,h,color)) {
++    if(!s.Targets(w,h,color,cfg.lowMemory)) {
 +        s.DestroyTargets();s.retryFrames=180;
 +        FX_LOG("PostFX targets %dx%d unavailable (GPU memory), retry in 180 frames",w,h);
 +        return false;
@@ -1991,8 +3293,31 @@ index 1241bfe..1076ea2 100644
 +    if(windowDepth) glBlitFramebuffer(0,0,w,h,0,0,w,h,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
      glReadBuffer(static_cast<GLenum>(oldRead));
      const bool decode=cfg.sourceIsSRGB && !srgb;
++    // Motion blur: previous camera of this context. A cut (teleport, respawn,
++    // camera switch: > 8 m or > 25 degrees in one frame) blurs nothing.
++    s.motionActive=false;
++    if(s.haveView && haveWorld) {
++        float vp[16];
++        for(int c=0;c<4;++c) for(int r=0;r<4;++r) {
++            float v=0;for(int k=0;k<4;++k) v+=world.projection[k*4+r]*world.view[c*4+k];
++            vp[c*4+r]=v;
++        }
++        const float* eye=s.invView+12;const float* forward=s.invView+8;
++        if(s.havePrev) {
++            const float dx=eye[0]-s.prevEye[0],dy=eye[1]-s.prevEye[1],dz=eye[2]-s.prevEye[2];
++            const float turn=forward[0]*s.prevForward[0]+forward[1]*s.prevForward[1]+forward[2]*s.prevForward[2];
++            s.motionActive=dx*dx+dy*dy+dz*dz<64.0f && turn>0.906f;
++            std::copy(s.prevViewProj,s.prevViewProj+16,s.motionPrev);
++        }
++        std::copy(vp,vp+16,s.prevViewProj);std::copy(eye,eye+3,s.prevEye);std::copy(forward,forward+3,s.prevForward);
++        s.havePrev=true;
++    } else s.havePrev=false;
++    EnsureLut(s,cfg);
      BloomPasses(s,cfg,decode);
 -    if(hasDepth) DepthPass(s,cfg,decode);
++    if(cfg.autoExposure>0 || cfg.dofStrength>0) StatePass(s,cfg,decode,depthTexture);
++    else s.stateValid=false;
++    if(depthTexture && cfg.dofStrength>0 && s.stateValid) DofPass(s,decode);
 +    if(depthTexture && (cfg.ssr || cfg.ssao)) DepthPass(s,cfg,decode,depthTexture,depthWidth,depthHeight);
      else {
          glBindFramebuffer(GL_DRAW_FRAMEBUFFER,s.effects.fbo);
@@ -2012,7 +3337,43 @@ index 1241bfe..1076ea2 100644
          s.reportedDepth=true;
      }
      return true;
-@@ -589,29 +750,45 @@ void EndFrame(EGLBoolean result) {
+@@ -584,34 +870,81 @@ bool TryRender(EGLDisplay d,EGLSurface s,bool early,const float* p=nullptr) noex
+     catch(const std::exception& e) { FX_LOG("PostFX skipped: %s",e.what());return false; }
+     catch(...) { FX_LOG("PostFX skipped: unknown error");return false; }
+ }
++// Adaptive quality: frame rate of GTA's own swaps in 2 s windows. Too slow
++// twice in a row -> one level lighter; fast for 10 s -> one level back.
++void MeasureFrame() {
++    if(!GraphicsRenderThread::OnRenderThread()) return;
++    static std::chrono::steady_clock::time_point start{};
++    static int frames=0,slow=0,fast=0;
++    const auto now=std::chrono::steady_clock::now();
++    if(start==std::chrono::steady_clock::time_point{}) { start=now;frames=0;return; }
++    ++frames;
++    const float elapsed=std::chrono::duration<float>(now-start).count();
++    if(elapsed<2.0f) return;
++    const float fps=float(frames)/elapsed;
++    start=now;frames=0;
++    if(elapsed>6.0f || !GraphicsSettings::AdaptiveEnabled()) { slow=fast=0;return; } // paused / off
++    const int target=GraphicsSettings::TargetFps();
++    const int level=GraphicsSettings::AdaptiveLevel();
++    if(fps<float(target)*0.80f) {
++        fast=0;
++        if(++slow>=2 && level<3) {
++            slow=0;GraphicsSettings::SetAdaptiveLevel(level+1);
++            FX_LOG("adaptive quality: %.0f FPS (target %d) -> level %d",fps,target,level+1);
++        }
++    } else if(fps>float(target)*0.95f) {
++        slow=0;
++        if(++fast>=5 && level>0) {
++            fast=0;GraphicsSettings::SetAdaptiveLevel(level-1);
++            FX_LOG("adaptive quality: %.0f FPS (target %d) -> level %d",fps,target,level-1);
++        }
++    } else slow=fast=0;
++}
+ void EndFrame(EGLBoolean result) {
++    MeasureFrame();
+     WorldSunShadow::AfterSwap(result);
      auto s=CurrentState(false);if(!s) return;
      s->processedBeforeHud=false;
      // Tidak memanggil eglGetError (error tetap dapat dibaca oleh game).
@@ -2064,7 +3425,7 @@ index 1241bfe..1076ea2 100644
      if(!realMakeCurrent) return EGL_FALSE;
      if(!installed.load()) return realMakeCurrent(d,draw,read,c);
      if(eglGetCurrentContext()!=c || eglGetCurrentDisplay()!=d ||
-@@ -619,6 +796,7 @@ EGLBoolean EGLAPIENTRY HookMakeCurrent(EGLDisplay d,EGLSurface draw,EGLSurface r
+@@ -619,6 +952,7 @@ EGLBoolean EGLAPIENTRY HookMakeCurrent(EGLDisplay d,EGLSurface draw,EGLSurface r
      return realMakeCurrent(d,draw,read,c);
  }
  EGLBoolean EGLAPIENTRY HookDestroyContext(EGLDisplay d,EGLContext c) {
@@ -2072,7 +3433,7 @@ index 1241bfe..1076ea2 100644
      if(!realDestroyContext) return EGL_FALSE;
      if(!installed.load()) return realDestroyContext(d,c);
      if(d==eglGetCurrentDisplay() && c==eglGetCurrentContext()) CleanupCurrent();
-@@ -626,47 +804,34 @@ EGLBoolean EGLAPIENTRY HookDestroyContext(EGLDisplay d,EGLContext c) {
+@@ -626,47 +960,34 @@ EGLBoolean EGLAPIENTRY HookDestroyContext(EGLDisplay d,EGLContext c) {
      return realDestroyContext(d,c);
  }
  EGLBoolean EGLAPIENTRY HookDestroySurface(EGLDisplay d,EGLSurface s) {
@@ -2135,7 +3496,7 @@ index 1241bfe..1076ea2 100644
      return true;
  }
  void* ResolveEgl(void* handle,const char* name) {
-@@ -678,11 +843,23 @@ template<class Function> bool Hook(void* symbol,const char* name,Function replac
+@@ -678,11 +999,23 @@ template<class Function> bool Hook(void* symbol,const char* name,Function replac
      if(!symbol || !backendHook) return false;
      void* hook=backendHook(symbol,reinterpret_cast<void*>(replacement),reinterpret_cast<void**>(&original));
      if(!hook || !original) {
@@ -2160,7 +3521,7 @@ index 1241bfe..1076ea2 100644
  } // namespace
  
  bool InstallHooks() {
-@@ -722,14 +899,12 @@ bool InstallHooks() {
+@@ -722,14 +1055,14 @@ bool InstallHooks() {
          if(symbols[6] && !Hook(symbols[6],names[6],&HookDamageKHR,realDamageKHR)) return;
          if(symbols[7]==symbols[6] && realDamageKHR) realDamageEXT=realDamageKHR;
          else if(symbols[7] && !Hook(symbols[7],names[7],&HookDamageEXT,realDamageEXT)) return;
@@ -2172,16 +3533,31 @@ index 1241bfe..1076ea2 100644
          installed=true;
          WorldSunShadow::InstallDrawHooks(backendHook);
 -        FX_LOG("EGL postFX SUN4 installed via initialized AML; no RenderWare offset changes");
++        TextureFilter::InstallHooks(backendHook);
++        WorldMsaa::InstallHooks(backendHook);
 +        WorldSunShadow::RequestWorldDepth(GetSettings().enabled);
 +        FX_LOG("EGL postFX SUN4 installed via ShadowHook; no AML, no RenderWare offset changes");
      });
      return installed.load();
  }
-@@ -748,14 +923,20 @@ void SetSettings(const Settings& input) {
+@@ -748,14 +1081,33 @@ void SetSettings(const Settings& input) {
      c.shadowLift=Clamp(c.shadowLift,0,0.03f,0.008f);c.vignette=Clamp(c.vignette,0,0.25f,0.04f);
      c.sunShafts=Clamp(c.sunShafts,0,0.5f,0.24f);c.lensFlare=Clamp(c.lensFlare,0,0.2f,0.045f);
      c.fogStrength=Clamp(c.fogStrength,0,1,0.65f);
 +    c.skyStrength=Clamp(c.skyStrength,0,1,0.35f);c.wetStrength=Clamp(c.wetStrength,0,1.5f,1.0f);
++    c.motionBlur=Clamp(c.motionBlur,0,1,0);c.dofStrength=Clamp(c.dofStrength,0,1,0);
++    c.autoExposure=Clamp(c.autoExposure,0,1,0.25f);c.aeKey=Clamp(c.aeKey,0.01f,1,0.11f);
++    c.aeMin=Clamp(c.aeMin,0.1f,4,0.5f);c.aeMax=Clamp(c.aeMax,c.aeMin,4,2.5f);c.aeSpeed=Clamp(c.aeSpeed,0.05f,10,1.5f);
++    c.hazeDensity=Clamp(c.hazeDensity,0,0.05f,0.001f);c.hazeUniform=Clamp(c.hazeUniform,0,0.05f,0.0005f);
++    c.hazeStart=Clamp(c.hazeStart,0,2000,40);c.hazeMax=Clamp(c.hazeMax,0,1,0.85f);
++    c.hazeFalloff=Clamp(c.hazeFalloff,0,1,0.045f);c.hazeBaseHeight=Clamp(c.hazeBaseHeight,-200,500,0);
++    c.hazeSun=Clamp(c.hazeSun,0,4,1);c.hazeFoggy=Clamp(c.hazeFoggy,1,10,3);
++    c.rayLength=Clamp(c.rayLength,0.2f,1,0.88f);c.rayDecay=Clamp(c.rayDecay,0.8f,0.999f,0.965f);
++    c.grain=Clamp(c.grain,0,1,0);c.dither=Clamp(c.dither,0,4,1);c.gradeStrength=Clamp(c.gradeStrength,0,1,1);
++    c.lutStrength=Clamp(c.lutStrength,0,1,1);c.lutPath[sizeof(c.lutPath)-1]=0;
++    c.wetReflection=Clamp(c.wetReflection,0,3,1);c.wetPuddles=Clamp(c.wetPuddles,0,2,1);
++    c.wetRipples=Clamp(c.wetRipples,0,2,1);c.wetForce=Clamp(c.wetForce,0,1,0);
++    c.nightThreshold=Clamp(c.nightThreshold,0.1f,1,0.52f);c.nightGlow=Clamp(c.nightGlow,0,4,1);
      for(auto& l:c.lights) {
          for(float& uv:l.uv) uv=Clamp(uv,-2,3,0.5f);
          for(float& rgb:l.color) rgb=Clamp(rgb,0,8,1);
@@ -2200,7 +3576,7 @@ index 1241bfe..1076ea2 100644
  void RenderBeforeHud(const float* projection) {
      if(insideSwap || !installed.load()) return;
      TryRender(eglGetCurrentDisplay(),eglGetCurrentSurface(EGL_DRAW),true,projection);
-@@ -768,4 +949,17 @@ void BindCurrentGameSurface() {
+@@ -768,4 +1120,17 @@ void BindCurrentGameSurface() {
          if(s) s->gameSurface=eglGetCurrentSurface(EGL_DRAW);
      } catch(...) { FX_LOG("Unable to register game EGL surface"); }
  }
@@ -2219,7 +3595,7 @@ index 1241bfe..1076ea2 100644
 +}
  } // namespace EglPostFX
 diff --git a/graphics/postfx/EglPostFX.h b/graphics/postfx/EglPostFX.h
-index 333a313..32dbe4b 100644
+index 333a313..2323f3d 100644
 --- a/graphics/postfx/EglPostFX.h
 +++ b/graphics/postfx/EglPostFX.h
 @@ -1,12 +1,13 @@
@@ -2266,7 +3642,7 @@ index 333a313..32dbe4b 100644
      float bloomKnee = 0.20f;
      float dirtStrength = 0.08f;
      float ssrStrength = 0.32f; // Wet-weather maximum; dry reflection is reduced.
-@@ -42,20 +49,21 @@ struct Settings {
+@@ -42,20 +49,40 @@ struct Settings {
      float ssrThickness = 0.30f;
      float aoStrength = 0.65f;
      float aoRadius = 1.0f;
@@ -2281,6 +3657,25 @@ index 333a313..32dbe4b 100644
      float fogStrength = 0.65f; // GLES3 + valid depth/projection only.
 +    float skyStrength = 0.35f; // Langit realtime: warna & glow matahari dari jam + cuaca.
 +    float wetStrength = 1.0f;  // Jalan basah/genangan saat hujan (CWeather::WetRoads).
++    float motionBlur = 0.0f;   // Motion blur kamera (reproyeksi depth), 0..1. 0 = pass dilewati.
++    float dofStrength = 0.0f;  // Depth of field (latar jauh buram), 0..1. 0 = pass dilewati.
++    // Tampilan sinematik. Nilai bawaan = foto referensi; bisa ditimpa oleh
++    // TESTLIT/graphics/ZyZGfx.ini (GraphicsSettings::LoadTuning).
++    float autoExposure = 0.25f; // Adaptasi mata 0..1 (0 = mati).
++    float aeKey = 0.11f, aeMin = 0.5f, aeMax = 2.5f, aeSpeed = 1.5f;
++    float hazeDensity = 0.0010f;  // Kabut tinggi (per meter, makin tipis ke atas).
++    float hazeUniform = 0.0005f;  // Kabut rata (per meter).
++    float hazeStart = 40.0f, hazeMax = 0.85f, hazeFalloff = 0.045f, hazeBaseHeight = 0.0f;
++    float hazeSun = 1.0f;         // Cahaya matahari di dalam kabut (silau ke arah matahari).
++    float hazeFoggy = 3.0f;       // Pengali kabut saat cuaca berkabut/hujan.
++    float rayLength = 0.88f, rayDecay = 0.965f;
++    float grain = 0.0f, dither = 1.0f, gradeStrength = 1.0f;
++    float lutStrength = 1.0f;
++    char lutPath[192] = {};       // Kosong = tanpa LUT.
++    float wetReflection = 1.0f, wetPuddles = 1.0f, wetRipples = 1.0f, wetForce = 0.0f;
++    float nightThreshold = 0.52f; // Ambang bloom malam relatif ke siang.
++    float nightGlow = 1.0f;       // Pengali bloom malam.
++    bool lowMemory = false;       // HP RAM kecil: target 8-bit, tanpa buffer tambahan.
      int lightCount = 0; // No fixed glowing spot pasted over the game by default.
      std::array<ScreenLight, 4> lights{};
  };
@@ -2293,7 +3688,7 @@ index 333a313..32dbe4b 100644
  bool InstallHooks();
  
  // Thread-safe. Tidak melakukan GL call; nilai diambil pada render thread.
-@@ -70,9 +78,13 @@ void BindCurrentGameSurface();
+@@ -70,9 +97,13 @@ void BindCurrentGameSurface();
  
  // Integrasi opsional pada batas scene -> HUD yang SUDAH ada di client.
  // Seluruh GL call tetap berjalan pada thread pemilik current EGLContext.
@@ -2309,11 +3704,23 @@ index 333a313..32dbe4b 100644
 +// berurutan dengan command game. HUD/chat/CEF/dialog tidak ikut diproses.
 +void SubmitBeforeHud(const FrameEnvironment& environment);
  } // namespace EglPostFX
+diff --git a/graphics/postfx/Gles2Pipeline.h b/graphics/postfx/Gles2Pipeline.h
+index 3dc0213..20c4fc7 100644
+--- a/graphics/postfx/Gles2Pipeline.h
++++ b/graphics/postfx/Gles2Pipeline.h
+@@ -191,6 +191,7 @@ struct CompatPipeline {
+         const Program& ap=atmosphereProgram;Begin(atmosphere,ap);Texture(0,scene.texture);
+         glUniform1i(ap[Scene],0);glUniform1i(ap[Decode],cfg.sourceIsSRGB);
+         glUniform2f(ap[Texel],1.0f/w,1.0f/h);glUniform4fv(ap[Sun],1,look.sun);
++        glUniform2f(ap[Rays],look.config.rayLength,look.config.rayDecay);
+         glUniform1f(ap[Aspect],float(w)/h);Draw();
+         const Program& p=compositeProgram;
+         glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,w,h);glUseProgram(p.id);
 diff --git a/graphics/postfx/LookProfile.h b/graphics/postfx/LookProfile.h
-index 9c72611..83d26a1 100644
+index 9c72611..35c5d69 100644
 --- a/graphics/postfx/LookProfile.h
 +++ b/graphics/postfx/LookProfile.h
-@@ -4,11 +4,46 @@
+@@ -4,11 +4,48 @@
  #include <cmath>
  
  namespace EglPostFX {
@@ -2328,7 +3735,7 @@ index 9c72611..83d26a1 100644
 +        case 1: case 5: case 10: case 14: case 18: t.clear=0.8f;break;            // SUNNY_*
 +        case 2: t.clear=0.85f;t.smog=1.0f;break;                                   // EXTRASUNNY_SMOG_LA
 +        case 3: t.clear=0.6f;t.smog=1.0f;break;                                    // SUNNY_SMOG_LA
-+        case 4: case 7: case 12: case 15: t.clear=0.15f;t.overcast=1.0f;break;     // CLOUDY_*
++        case 4: case 7: case 12: case 15: t.clear=0.35f;t.overcast=1.0f;break;     // CLOUDY_*
 +        case 8: case 16: t.clear=0.0f;t.overcast=1.0f;t.rain=1.0f;break;           // RAINY_*
 +        case 9: t.clear=0.1f;t.overcast=0.6f;t.fog=1.0f;break;                     // FOGGY_SF
 +        case 19: t.clear=0.2f;t.sand=1.0f;break;                                   // SANDSTORM_DESERT
@@ -2357,10 +3764,12 @@ index 9c72611..83d26a1 100644
 +    float sunColor[4]{};     // rgb glow colour, w = glow strength
 +    float sunDirection[4]{0,0,1,0}; // world direction to the sun, w = visibility
 +    float wet[4]{};          // wetness, rain, puddle coverage, reflection boost
++    float haze[4]{};         // density, start metres, max opacity, height falloff
++    float hazeBase[4]{};     // base height, sun scattering, horizon colour share, uniform density
  };
  inline float Unit(float x) { return std::isfinite(x) ? std::clamp(x,0.0f,1.0f) : 0.0f; }
  inline float Smooth(float a,float b,float x) {
-@@ -17,21 +52,40 @@ inline float Smooth(float a,float b,float x) {
+@@ -17,21 +54,43 @@ inline float Smooth(float a,float b,float x) {
  inline FrameEnvironment CleanEnvironment(FrameEnvironment e) {
      if(!std::isfinite(e.hour) || e.hour<0 || e.hour>=24) { e.valid=false;e.hour=12; }
      e.rain=Unit(e.rain);e.wetness=Unit(e.wetness);e.cloud=Unit(e.cloud);e.fog=Unit(e.fog);
@@ -2400,13 +3809,16 @@ index 9c72611..83d26a1 100644
          golden=std::max(1-std::abs(e.hour-6.5f)/1.6f,1-std::abs(e.hour-18.0f)/1.7f);
 -        golden=Unit(golden)*(1-e.cloud)*(1-e.rain);
 -        rain=Unit(e.rain*0.8f+e.fog*0.4f+e.cloud*0.12f);wet=e.wetness;
-+        golden=Unit(golden)*(1-e.cloud)*(1-e.rain)*(1-0.7f*w.overcast);
-+        rain=Unit(e.rain*0.8f+e.fog*0.4f+e.cloud*0.12f);
++        // Gated like the traits: with "Grafis ikut cuaca" off, clouds do not
++        // remove the golden hour.
++        const float cloud=settings.weatherLook ? e.cloud : 0.0f;
++        golden=Unit(golden)*(1-0.6f*cloud)*(1-e.rain)*(1-0.5f*w.overcast);
++        rain=Unit(e.rain*0.8f+e.fog*0.4f+cloud*0.12f);
 +        wet=std::max(e.wetness,e.rain*0.6f);
      }
      switch(settings.preset) {
          case LookPreset::Day: day=1;night=golden=rain=0;break;
-@@ -41,27 +95,67 @@ inline LookProfile BuildLook(const Settings& settings,const FrameEnvironment& in
+@@ -41,27 +100,76 @@ inline LookProfile BuildLook(const Settings& settings,const FrameEnvironment& in
          default: break;
      }
      LookProfile p;p.config=settings;auto& c=p.config;
@@ -2414,11 +3826,12 @@ index 9c72611..83d26a1 100644
 -    c.saturation*=1-rain*0.18f-night*0.04f;
 -    c.contrast*=1-rain*0.04f;
 -    c.bloomStrength*=1+golden*0.75f+night*0.65f;
+-    c.bloomThreshold*=1-night*0.48f-golden*0.18f;
 +    c.exposure*=1+night*0.10f+golden*0.04f-rain*0.08f-w.overcast*0.03f*day;
 +    c.saturation*=1-rain*0.18f-night*0.04f-w.overcast*0.08f-w.fog*0.12f-w.sand*0.10f-w.smog*0.06f;
 +    c.contrast*=1-rain*0.04f-w.fog*0.08f-w.sand*0.06f-w.overcast*0.04f;
-+    c.bloomStrength*=1+golden*0.75f+night*0.65f+w.clear*day*0.20f;
-     c.bloomThreshold*=1-night*0.48f-golden*0.18f;
++    c.bloomStrength*=1+golden*0.75f+night*0.65f*c.nightGlow+w.clear*day*0.20f;
++    c.bloomThreshold*=1-night*(1-c.nightThreshold)-golden*0.18f;
 +    c.vibrance+=0.05f*w.clear*day;
      c.ssrStrength*=0.22f+0.78f*std::max(wet,rain);
      p.shadow[0]=1-0.19f*night-0.055f*rain;
@@ -2477,16 +3890,25 @@ index 9c72611..83d26a1 100644
 +    p.sunDirection[0]=e.toSun[0];p.sunDirection[1]=e.toSun[1];p.sunDirection[2]=e.toSun[2];
 +    p.sunDirection[3]=visibility;
 +
-+    const float wetness=Unit(wet*c.wetStrength)*(1-e.underwater);
++    const float wetness=Unit(std::max(wet,c.wetForce)*c.wetStrength)*(1-e.underwater);
 +    p.wet[0]=wetness;
-+    p.wet[1]=Unit(e.rain)*c.wetStrength*(1-e.tunnel);
-+    p.wet[2]=0.25f+0.45f*wetness;
-+    p.wet[3]=2.5f;
++    p.wet[1]=Unit(e.rain)*c.wetStrength*c.wetRipples*(1-e.tunnel);
++    p.wet[2]=Unit((0.25f+0.45f*wetness)*c.wetPuddles);
++    p.wet[3]=2.5f*c.wetReflection;
++
++    // Aerial haze (photo look): sunlit near the sun, thicker in fog and rain.
++    const float foggy=1+(c.hazeFoggy-1)*Unit(std::max(std::max(w.fog,e.fog),std::max(rain*0.6f,w.sand*0.8f)));
++    const float open=(1-e.underwater)*(1-e.tunnel)*c.fogStrength*foggy;
++    p.haze[0]=c.hazeDensity*open;p.haze[1]=c.hazeStart;p.haze[2]=c.hazeMax;p.haze[3]=c.hazeFalloff;
++    p.hazeBase[0]=c.hazeBaseHeight;
++    p.hazeBase[1]=c.hazeSun*(0.6f+0.8f*golden)*(1-night);
++    p.hazeBase[2]=settings.weatherLook ? 0.75f : 0.4f;
++    p.hazeBase[3]=c.hazeUniform*open;
      return p;
  }
  } // namespace EglPostFX
 diff --git a/graphics/postfx/ShaderSources.h b/graphics/postfx/ShaderSources.h
-index f5ee334..35cf1a1 100644
+index f5ee334..9548e5c 100644
 --- a/graphics/postfx/ShaderSources.h
 +++ b/graphics/postfx/ShaderSources.h
 @@ -1,8 +1,8 @@
@@ -2531,7 +3953,7 @@ index f5ee334..35cf1a1 100644
  }
  )GLSL";
  inline constexpr char kBlur[] = R"GLSL(#version 300 es
-@@ -206,6 +212,15 @@ uniform vec4 uDetail,uFog;
+@@ -206,6 +212,26 @@ uniform vec4 uDetail,uFog;
  uniform vec3 uShadowTint,uHighlightTint;
  uniform vec2 uTexel;
  uniform float uClearDepth;
@@ -2544,10 +3966,21 @@ index f5ee334..35cf1a1 100644
 +uniform vec4 uWet;          // wetness, rain, puddle coverage, reflection boost
 +uniform vec2 uDepthTexel;   // 1 / depth texture size
 +uniform int uFXAA;          // 1 = FXAA on the world image (HUD is drawn later)
++uniform sampler2D uState;   // 1x1: auto exposure / 4, sqrt(focus / 1000 m), average luminance
++uniform sampler2D uDofTex;  // half-resolution blurred scene (depth of field)
++uniform sampler2D uLUT;     // colour lookup strip (size*size x size), display space
++uniform vec4 uHaze;         // density per metre, start metres, max opacity, height falloff
++uniform vec4 uHazeBase;     // base height, sun scattering, horizon colour share, uniform density
++uniform vec4 uAutoExposure; // strength, 0, 0, 0
++uniform vec4 uDof;          // strength, 0, 0, 0
++uniform vec4 uMotion;       // strength, max length (uv), near fade metres, enabled
++uniform mat4 uPrevViewProj; // world -> previous frame clip
++uniform vec4 uLut;          // strength, size, 0, enabled
++uniform vec4 uFinish;       // film grain, dither, grading strength, 0
  vec3 linearRGB(vec3 c) {
      return mix(c/12.92,pow(max((c+0.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(0.04045),c));
  }
-@@ -240,6 +255,42 @@ float viewDepth(vec2 uv) {
+@@ -240,6 +266,42 @@ float viewDepth(vec2 uv) {
      vec4 p=uInvProjection*vec4(uv*2.0-1.0,z,1);
      return abs(p.z/max(abs(p.w),1e-7));
  }
@@ -2590,7 +4023,7 @@ index f5ee334..35cf1a1 100644
  vec4 effects() {
      if(uHasDepth==0) return vec4(0,0,0,1);
      // Depth-aware 4-tap upsample untuk mengurangi halo half-resolution.
-@@ -258,17 +309,72 @@ vec4 effects() {
+@@ -258,17 +320,119 @@ vec4 effects() {
  vec3 scene(vec2 uv) {
      vec3 c=texture(uScene,uv).rgb;return uDecodeSRGB!=0 ? linearRGB(c) : c;
  }
@@ -2645,6 +4078,43 @@ index f5ee334..35cf1a1 100644
 +    c+=uSunColor.rgb*(pow(mu,48.0)*0.55+pow(mu,6.0)*0.18)*uSunColor.w;
 +    return c;
 +}
++// Camera motion blur by reprojection into the previous frame. Pixels close to
++// the camera (own car/character, which move WITH the camera) stay sharp.
++vec3 motionBlur(vec3 c,bool geometry,float distance) {
++    vec4 world=geometry ? uInvView*vec4(viewPosition(vUV),1.0) : vec4(worldDirection(vUV),0.0);
++    vec4 clip=uPrevViewProj*world;
++    if(clip.w<=1e-4) return c;
++    vec2 velocity=(vUV-(clip.xy/clip.w*0.5+0.5))*uMotion.x;
++    float len=length(velocity);
++    if(len>uMotion.y) velocity*=uMotion.y/len;
++    if(geometry) velocity*=smoothstep(uMotion.z,uMotion.z*2.5,distance);
++    if(length(velocity/uTexel)<1.0) return c;
++    vec3 sum=c;
++    for(int i=1;i<8;++i) sum+=scene(vUV-velocity*(float(i)/7.0));
++    return sum*0.125;
++}
++// Aerial haze: thicker near the ground, lit by the sun when looking into it.
++vec3 haze(vec3 c,float distance) {
++    vec3 p=viewPosition(vUV);
++    vec3 world=(uInvView*vec4(p,1.0)).xyz;
++    vec3 eye=uInvView[3].xyz;
++    float height=0.5*(world.z+eye.z)-uHazeBase.x;
++    float density=uHaze.x*exp(-max(height,0.0)*uHaze.w)+uHazeBase.w;
++    float amount=min(1.0-exp(-max(distance-uHaze.y,0.0)*density),uHaze.z);
++    float mu=max(dot(normalize(world-eye),uSunDirection.xyz),0.0);
++    vec3 colour=mix(uFog.rgb,uSkyHorizon.rgb,uHazeBase.z)
++        +uSunColor.rgb*(pow(mu,6.0)*0.45+pow(mu,28.0)*0.85)*uHazeBase.y*uSunDirection.w;
++    return mix(c,colour,amount);
++}
++vec3 applyLut(vec3 g) {
++    float n=uLut.y;
++    g=clamp(g,0.0,1.0);
++    float b=g.b*(n-1.0);float b0=floor(b);float b1=min(b0+1.0,n-1.0);
++    float x=g.r*(n-1.0)+0.5;float y=(g.g*(n-1.0)+0.5)/n;
++    vec3 l0=texture(uLUT,vec2((b0*n+x)/(n*n),y)).rgb;
++    vec3 l1=texture(uLUT,vec2((b1*n+x)/(n*n),y)).rgb;
++    return mix(g,mix(l0,l1,b-b0),uLut.x);
++}
  void main() {
      vec4 src=texture(uScene,vUV);
 -    vec3 c=uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb;
@@ -2655,18 +4125,45 @@ index f5ee334..35cf1a1 100644
      vec4 fx=effects();
 -    c=c*fx.a+fx.rgb;
 -    if(uHasDepth!=0 && abs(texture(uDepth,vUV).r-uClearDepth)>0.0000002) {
+-        float distance=max(viewDepth(vUV)-8.0,0.0);
 +    bool geometry=uHasDepth!=0 && abs(texture(uDepth,vUV).r-uClearDepth)>0.0000002;
++    float depthMetres=geometry ? viewDepth(vUV) : 1.0e5;
++    vec4 state=texture(uState,vec2(0.5));
++    if(uMotion.w>0.5) c=motionBlur(c,geometry,depthMetres);
++    if(uDof.x>0.0 && uHasDepth!=0) {
++        float focus=state.g*state.g*1000.0;
++        float start=focus*1.3+4.0;
++        float coc=uDof.x*smoothstep(start,start+max(focus*2.0,25.0),depthMetres);
++        c=mix(c,texture(uDofTex,vUV).rgb,coc);
++    }
 +    float reflection=geometry && uWet.x>0.01 ? wetSurface(c) : 1.0;
 +    c=c*fx.a+fx.rgb*reflection;
 +    if(geometry) {
-         float distance=max(viewDepth(vUV)-8.0,0.0);
++        float distance=max(depthMetres-8.0,0.0);
          c=mix(c,uFog.rgb,clamp(1.0-exp(-distance*uFog.a),0.0,0.78));
++        if(uHaze.x>0.0) c=haze(c,depthMetres);
 +    } else if(uHasDepth!=0 && uSkyZenith.w+uSkyHorizon.w+uSunColor.w>0.0) {
 +        c=skyGrade(c);
      }
      vec3 bloom=texture(uBloom0,vUV).rgb*0.50+texture(uBloom1,vUV).rgb*0.30+texture(uBloom2,vUV).rgb*0.20;
      c+=bloom*uBloomDirt.x*(1.0+texture(uDirt,vUV).r*uBloomDirt.y);
-@@ -287,9 +393,11 @@ void main() {
+@@ -281,15 +445,25 @@ void main() {
+         float pulse=1.0+uLightColor[i].a*sin(uTime*0.6+float(i)*1.7);
+         c+=uLightColor[i].rgb*(uLightPosition[i].w*glow*pulse);
+     }
+-    c=referenceGrade(c,uGrade,uDetail,uShadowTint,uHighlightTint,vUV);
+-    outColor=vec4(uEncodeSRGB!=0 ? gammaRGB(c) : c,src.a);
++    c*=mix(1.0,state.r*4.0,uAutoExposure.x);
++    vec3 graded=referenceGrade(c,uGrade,uDetail,uShadowTint,uHighlightTint,vUV);
++    c=mix(min(c,vec3(1.0)),graded,uFinish.z);
++    // Display space for the LUT, grain and dither (sRGB surfaces encode later).
++    vec3 display=gammaRGB(c);
++    if(uLut.w>0.5) display=applyLut(display);
++    float noise=hash12(gl_FragCoord.xy+fract(uTime*7.31)*vec2(127.1,311.7));
++    display+=(noise-0.5)*(uFinish.y/255.0+uFinish.x*0.08*(1.0-luma(display)));
++    display=clamp(display,0.0,1.0);
++    outColor=vec4(uEncodeSRGB!=0 ? display : linearRGB(display),src.a);
+ }
  )GLSL";
  inline constexpr char kAtmosphere[] = R"GLSL(#version 300 es
  precision highp float;
@@ -2678,8 +4175,11 @@ index f5ee334..35cf1a1 100644
  vec3 linearRGB(vec3 c) {
      return mix(c/12.92,pow(max((c+0.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(0.04045),c));
  }
-@@ -324,31 +432,54 @@ uniform vec2 uTexel;
+@@ -322,37 +496,149 @@ vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlight
+ uniform sampler2D uScene;
+ uniform vec2 uTexel;
  uniform vec4 uSun; // sun UV, shaft strength, flare strength.
++uniform vec2 uRays; // ray length (share of the way to the sun), decay per step
  uniform float uAspect;
  uniform int uDecodeSRGB;
 +#ifdef FX_DEPTH
@@ -2711,6 +4211,7 @@ index f5ee334..35cf1a1 100644
 -        +highlightAt(uSun.xy-uTexel*vec2(2,0))+highlightAt(uSun.xy+uTexel*vec2(0,2))
 -        +highlightAt(uSun.xy-uTexel*vec2(0,2)))*0.2;
 -    float visibility=smoothstep(0.30,0.90,max(light.r,max(light.g,light.b)));
+-    vec2 delta=(uSun.xy-uv)*(0.88/24.0);
 +    // Visibility = share of open, bright sky in a small disc around the sun.
 +    // Fractional, so the rays fade while the sun slides behind an edge.
 +    vec2 centre=clamp(uSun.xy,vec2(0.002),vec2(0.998));
@@ -2722,11 +4223,11 @@ index f5ee334..35cf1a1 100644
 +    }
 +    light/=12.0;open/=12.0;
 +    float visibility=smoothstep(0.20,0.85,max(light.r,max(light.g,light.b)))*open;
-     vec2 delta=(uSun.xy-uv)*(0.88/24.0);
++    vec2 delta=(uSun.xy-uv)*(uRays.x/24.0);
      vec2 p=uv;vec3 rays=vec3(0);float decay=1.0;
      for(int i=0;i<24;++i) {
 -        p+=delta;rays+=highlightAt(p)*decay;decay*=0.965;
-+        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=0.965;
++        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=uRays.y;
      }
      vec2 sunDelta=(uv-uSun.xy)*vec2(uAspect,1);
      float halo=exp(-dot(sunDelta,sunDelta)/0.025);
@@ -2741,8 +4242,103 @@ index f5ee334..35cf1a1 100644
  }
  
  void main() { outColor=vec4(sunEffects(vUV),1); }
-@@ -503,31 +634,54 @@ uniform vec2 uTexel;
+ )GLSL";
++inline constexpr char kState[] = R"GLSL(#version 300 es
++precision highp float;
++precision highp sampler2D;
++in highp vec2 vUV;
++layout(location=0) out vec4 outColor;
++// One pixel of slowly changing frame state, ping-ponged between two 1x1
++// targets: r = auto exposure / 4, g = sqrt(focus distance / 1000 m),
++// b = average scene luminance. Read by the composite pass.
++uniform sampler2D uScene;
++uniform sampler2D uDepth;
++uniform sampler2D uSource;   // state of the previous frame
++uniform int uHasDepth;
++uniform int uDecodeSRGB;
++uniform float uClearDepth;
++uniform vec2 uDepthRange;
++uniform mat4 uInvProjection;
++uniform vec4 uAdapt;         // key, min, max, blend (1 = reset)
++uniform vec4 uFocus;         // blend (1 = reset), fallback focus metres
++vec3 linearRGB(vec3 c) {
++    return mix(c/12.92,pow(max((c+0.055)/1.055,vec3(0)),vec3(2.4)),step(vec3(0.04045),c));
++}
++vec3 gammaRGB(vec3 c) {
++    c=max(c,vec3(0));
++    return mix(c*12.92,1.055*pow(c,vec3(1.0/2.4))-0.055,step(vec3(0.0031308),c));
++}
++float luma(vec3 c) { return dot(c,vec3(0.2126,0.7152,0.0722)); }
++vec3 filmic(vec3 x) {
++    return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),0.0,1.0);
++}
++vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlightTint,vec2 uv) {
++    float lum=luma(c);
++    float chroma=max(c.r,max(c.g,c.b))-min(c.r,min(c.g,c.b));
++    // Protect saturated lamp/neon colors from the blue night shadow tint.
++    float shadow=(1.0-smoothstep(0.035,0.35,lum))*(1.0-clamp(chroma*3.0,0.0,1.0));
++    c*=mix(vec3(1),shadowTint,shadow)*mix(vec3(1),highlightTint,smoothstep(0.12,0.8,lum));
++    c*=grade.x;
++    c=mix(c,filmic(c),grade.w);
++    c=mix(vec3(luma(c)),c,grade.y+detail.y*(1.0-clamp(chroma*2.0,0.0,1.0)));
++    // Preserve black and avoid the hard clipping of an affine contrast curve.
++    c=0.18*pow(max(c/0.18,vec3(0)),vec3(grade.z));
++    float toe=luma(c);
++    c+=detail.z*smoothstep(0.0,0.02,toe)*(1.0-smoothstep(0.03,0.20,toe));
++    vec2 q=uv*2.0-1.0;
++    c*=1.0-detail.w*smoothstep(0.2,1.6,dot(q,q));
++    return max(c,vec3(0));
++}
++
++float viewDepthAt(vec2 uv,out bool sky) {
++    float raw=texture(uDepth,uv).r;
++    sky=abs(raw-uClearDepth)<0.0000002;
++    float z=(raw-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
++    vec4 p=uInvProjection*vec4(uv*2.0-1.0,z,1.0);
++    return abs(p.z/max(abs(p.w),1e-7));
++}
++void main() {
++    // Log-average luminance of an 8x8 grid, centre weighted (HUD-free world).
++    float logSum=0.0,weightSum=0.0;
++    for(int y=0;y<8;++y) for(int x=0;x<8;++x) {
++        vec2 g=(vec2(float(x),float(y))+0.5)/8.0;
++        vec2 uv=mix(vec2(0.08),vec2(0.92),g);
++        vec3 c=texture(uScene,uv).rgb;
++        if(uDecodeSRGB!=0) c=linearRGB(c);
++        vec2 q=uv*2.0-1.0;
++        float w=1.0-0.6*clamp(dot(q,q),0.0,1.0);
++        logSum+=log(max(luma(c),1e-4))*w;weightSum+=w;
++    }
++    float average=exp(logSum/max(weightSum,1e-4));
++    float exposure=clamp(uAdapt.x/max(average,1e-4),uAdapt.y,uAdapt.z);
++
++    float focus=uFocus.y;
++    if(uHasDepth!=0) {
++        float sum=0.0,count=0.0;
++        for(int i=0;i<5;++i) {
++            float a=float(i)*1.2566371;
++            vec2 uv=vec2(0.5)+(i==0 ? vec2(0.0) : vec2(cos(a),sin(a))*0.035);
++            bool sky;float d=viewDepthAt(uv,sky);
++            if(!sky) { sum+=d;count+=1.0; }
++        }
++        focus=count>0.0 ? sum/count : 400.0;
++    }
++    vec4 previous=texture(uSource,vec2(0.5));
++    float oldExposure=previous.r*4.0;
++    float oldFocus=previous.g*previous.g*1000.0;
++    float e=mix(oldExposure,exposure,clamp(uAdapt.w,0.0,1.0));
++    float f=mix(oldFocus,focus,clamp(uFocus.x,0.0,1.0));
++    outColor=vec4(clamp(e*0.25,0.0,1.0),sqrt(clamp(f/1000.0,0.0,1.0)),clamp(average,0.0,1.0),1.0);
++}
++)GLSL";
+ inline constexpr char kCompatVertex[] = R"GLSL(#version 100
+ attribute vec2 aPosition;
+ varying highp vec2 vUV;
+@@ -501,33 +787,57 @@ vec3 referenceGrade(vec3 c,vec4 grade,vec4 detail,vec3 shadowTint,vec3 highlight
+ uniform sampler2D uScene;
+ uniform vec2 uTexel;
  uniform vec4 uSun; // sun UV, shaft strength, flare strength.
++uniform vec2 uRays; // ray length (share of the way to the sun), decay per step
  uniform float uAspect;
  uniform int uDecodeSRGB;
 +#ifdef FX_DEPTH
@@ -2774,6 +4370,7 @@ index f5ee334..35cf1a1 100644
 -        +highlightAt(uSun.xy-uTexel*vec2(2,0))+highlightAt(uSun.xy+uTexel*vec2(0,2))
 -        +highlightAt(uSun.xy-uTexel*vec2(0,2)))*0.2;
 -    float visibility=smoothstep(0.30,0.90,max(light.r,max(light.g,light.b)));
+-    vec2 delta=(uSun.xy-uv)*(0.88/24.0);
 +    // Visibility = share of open, bright sky in a small disc around the sun.
 +    // Fractional, so the rays fade while the sun slides behind an edge.
 +    vec2 centre=clamp(uSun.xy,vec2(0.002),vec2(0.998));
@@ -2785,11 +4382,11 @@ index f5ee334..35cf1a1 100644
 +    }
 +    light/=12.0;open/=12.0;
 +    float visibility=smoothstep(0.20,0.85,max(light.r,max(light.g,light.b)))*open;
-     vec2 delta=(uSun.xy-uv)*(0.88/24.0);
++    vec2 delta=(uSun.xy-uv)*(uRays.x/24.0);
      vec2 p=uv;vec3 rays=vec3(0);float decay=1.0;
      for(int i=0;i<24;++i) {
 -        p+=delta;rays+=highlightAt(p)*decay;decay*=0.965;
-+        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=0.965;
++        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=uRays.y;
      }
      vec2 sunDelta=(uv-uSun.xy)*vec2(uAspect,1);
      float halo=exp(-dot(sunDelta,sunDelta)/0.025);
@@ -2806,10 +4403,10 @@ index f5ee334..35cf1a1 100644
  void main() { gl_FragColor=vec4(sunEffects(vUV),1); }
 diff --git a/graphics/postfx/embed_shaders.py b/graphics/postfx/embed_shaders.py
 new file mode 100644
-index 0000000..0a5e52b
+index 0000000..d38cd68
 --- /dev/null
 +++ b/graphics/postfx/embed_shaders.py
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,50 @@
 +#!/usr/bin/env python3
 +"""Regenerates ShaderSources.h from shaders/*. Run from any directory:
 +    python3 graphics/postfx/embed_shaders.py
@@ -2826,6 +4423,7 @@ index 0000000..0a5e52b
 +    ("kDepthEffects", "depth_effects.frag"),
 +    ("kComposite", "composite.frag"),
 +    ("kAtmosphere", "atmosphere.frag"),
++    ("kState", "state.frag"),
 +    ("kCompatVertex", "compat_fullscreen.vert"),
 +    ("kCompatBloom", "compat_bloom.frag"),
 +    ("kCompatComposite", "compat_composite.frag"),
@@ -2875,10 +4473,10 @@ index 3ae46d3..67eb2dc 100644
  #include "light_shafts.glsl"
  void main() { outColor=vec4(sunEffects(vUV),1); }
 diff --git a/graphics/postfx/shaders/composite.frag b/graphics/postfx/shaders/composite.frag
-index ec47e77..c2a3f30 100644
+index ec47e77..78b095d 100644
 --- a/graphics/postfx/shaders/composite.frag
 +++ b/graphics/postfx/shaders/composite.frag
-@@ -28,12 +28,57 @@ uniform vec4 uDetail,uFog;
+@@ -28,12 +28,68 @@ uniform vec4 uDetail,uFog;
  uniform vec3 uShadowTint,uHighlightTint;
  uniform vec2 uTexel;
  uniform float uClearDepth;
@@ -2891,6 +4489,17 @@ index ec47e77..c2a3f30 100644
 +uniform vec4 uWet;          // wetness, rain, puddle coverage, reflection boost
 +uniform vec2 uDepthTexel;   // 1 / depth texture size
 +uniform int uFXAA;          // 1 = FXAA on the world image (HUD is drawn later)
++uniform sampler2D uState;   // 1x1: auto exposure / 4, sqrt(focus / 1000 m), average luminance
++uniform sampler2D uDofTex;  // half-resolution blurred scene (depth of field)
++uniform sampler2D uLUT;     // colour lookup strip (size*size x size), display space
++uniform vec4 uHaze;         // density per metre, start metres, max opacity, height falloff
++uniform vec4 uHazeBase;     // base height, sun scattering, horizon colour share, uniform density
++uniform vec4 uAutoExposure; // strength, 0, 0, 0
++uniform vec4 uDof;          // strength, 0, 0, 0
++uniform vec4 uMotion;       // strength, max length (uv), near fade metres, enabled
++uniform mat4 uPrevViewProj; // world -> previous frame clip
++uniform vec4 uLut;          // strength, size, 0, enabled
++uniform vec4 uFinish;       // film grain, dither, grading strength, 0
  #include "reference_color.glsl"
  float viewDepth(vec2 uv) {
      float z=(texture(uDepth,uv).r-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
@@ -2936,7 +4545,7 @@ index ec47e77..c2a3f30 100644
  vec4 effects() {
      if(uHasDepth==0) return vec4(0,0,0,1);
      // Depth-aware 4-tap upsample untuk mengurangi halo half-resolution.
-@@ -52,17 +97,72 @@ vec4 effects() {
+@@ -52,17 +108,119 @@ vec4 effects() {
  vec3 scene(vec2 uv) {
      vec3 c=texture(uScene,uv).rgb;return uDecodeSRGB!=0 ? linearRGB(c) : c;
  }
@@ -2991,6 +4600,43 @@ index ec47e77..c2a3f30 100644
 +    c+=uSunColor.rgb*(pow(mu,48.0)*0.55+pow(mu,6.0)*0.18)*uSunColor.w;
 +    return c;
 +}
++// Camera motion blur by reprojection into the previous frame. Pixels close to
++// the camera (own car/character, which move WITH the camera) stay sharp.
++vec3 motionBlur(vec3 c,bool geometry,float distance) {
++    vec4 world=geometry ? uInvView*vec4(viewPosition(vUV),1.0) : vec4(worldDirection(vUV),0.0);
++    vec4 clip=uPrevViewProj*world;
++    if(clip.w<=1e-4) return c;
++    vec2 velocity=(vUV-(clip.xy/clip.w*0.5+0.5))*uMotion.x;
++    float len=length(velocity);
++    if(len>uMotion.y) velocity*=uMotion.y/len;
++    if(geometry) velocity*=smoothstep(uMotion.z,uMotion.z*2.5,distance);
++    if(length(velocity/uTexel)<1.0) return c;
++    vec3 sum=c;
++    for(int i=1;i<8;++i) sum+=scene(vUV-velocity*(float(i)/7.0));
++    return sum*0.125;
++}
++// Aerial haze: thicker near the ground, lit by the sun when looking into it.
++vec3 haze(vec3 c,float distance) {
++    vec3 p=viewPosition(vUV);
++    vec3 world=(uInvView*vec4(p,1.0)).xyz;
++    vec3 eye=uInvView[3].xyz;
++    float height=0.5*(world.z+eye.z)-uHazeBase.x;
++    float density=uHaze.x*exp(-max(height,0.0)*uHaze.w)+uHazeBase.w;
++    float amount=min(1.0-exp(-max(distance-uHaze.y,0.0)*density),uHaze.z);
++    float mu=max(dot(normalize(world-eye),uSunDirection.xyz),0.0);
++    vec3 colour=mix(uFog.rgb,uSkyHorizon.rgb,uHazeBase.z)
++        +uSunColor.rgb*(pow(mu,6.0)*0.45+pow(mu,28.0)*0.85)*uHazeBase.y*uSunDirection.w;
++    return mix(c,colour,amount);
++}
++vec3 applyLut(vec3 g) {
++    float n=uLut.y;
++    g=clamp(g,0.0,1.0);
++    float b=g.b*(n-1.0);float b0=floor(b);float b1=min(b0+1.0,n-1.0);
++    float x=g.r*(n-1.0)+0.5;float y=(g.g*(n-1.0)+0.5)/n;
++    vec3 l0=texture(uLUT,vec2((b0*n+x)/(n*n),y)).rgb;
++    vec3 l1=texture(uLUT,vec2((b1*n+x)/(n*n),y)).rgb;
++    return mix(g,mix(l0,l1,b-b0),uLut.x);
++}
  void main() {
      vec4 src=texture(uScene,vUV);
 -    vec3 c=uDecodeSRGB!=0 ? linearRGB(src.rgb) : src.rgb;
@@ -3001,17 +4647,45 @@ index ec47e77..c2a3f30 100644
      vec4 fx=effects();
 -    c=c*fx.a+fx.rgb;
 -    if(uHasDepth!=0 && abs(texture(uDepth,vUV).r-uClearDepth)>0.0000002) {
+-        float distance=max(viewDepth(vUV)-8.0,0.0);
 +    bool geometry=uHasDepth!=0 && abs(texture(uDepth,vUV).r-uClearDepth)>0.0000002;
++    float depthMetres=geometry ? viewDepth(vUV) : 1.0e5;
++    vec4 state=texture(uState,vec2(0.5));
++    if(uMotion.w>0.5) c=motionBlur(c,geometry,depthMetres);
++    if(uDof.x>0.0 && uHasDepth!=0) {
++        float focus=state.g*state.g*1000.0;
++        float start=focus*1.3+4.0;
++        float coc=uDof.x*smoothstep(start,start+max(focus*2.0,25.0),depthMetres);
++        c=mix(c,texture(uDofTex,vUV).rgb,coc);
++    }
 +    float reflection=geometry && uWet.x>0.01 ? wetSurface(c) : 1.0;
 +    c=c*fx.a+fx.rgb*reflection;
 +    if(geometry) {
-         float distance=max(viewDepth(vUV)-8.0,0.0);
++        float distance=max(depthMetres-8.0,0.0);
          c=mix(c,uFog.rgb,clamp(1.0-exp(-distance*uFog.a),0.0,0.78));
++        if(uHaze.x>0.0) c=haze(c,depthMetres);
 +    } else if(uHasDepth!=0 && uSkyZenith.w+uSkyHorizon.w+uSunColor.w>0.0) {
 +        c=skyGrade(c);
      }
      vec3 bloom=texture(uBloom0,vUV).rgb*0.50+texture(uBloom1,vUV).rgb*0.30+texture(uBloom2,vUV).rgb*0.20;
      c+=bloom*uBloomDirt.x*(1.0+texture(uDirt,vUV).r*uBloomDirt.y);
+@@ -75,6 +233,14 @@ void main() {
+         float pulse=1.0+uLightColor[i].a*sin(uTime*0.6+float(i)*1.7);
+         c+=uLightColor[i].rgb*(uLightPosition[i].w*glow*pulse);
+     }
+-    c=referenceGrade(c,uGrade,uDetail,uShadowTint,uHighlightTint,vUV);
+-    outColor=vec4(uEncodeSRGB!=0 ? gammaRGB(c) : c,src.a);
++    c*=mix(1.0,state.r*4.0,uAutoExposure.x);
++    vec3 graded=referenceGrade(c,uGrade,uDetail,uShadowTint,uHighlightTint,vUV);
++    c=mix(min(c,vec3(1.0)),graded,uFinish.z);
++    // Display space for the LUT, grain and dither (sRGB surfaces encode later).
++    vec3 display=gammaRGB(c);
++    if(uLut.w>0.5) display=applyLut(display);
++    float noise=hash12(gl_FragCoord.xy+fract(uTime*7.31)*vec2(127.1,311.7));
++    display+=(noise-0.5)*(uFinish.y/255.0+uFinish.x*0.08*(1.0-luma(display)));
++    display=clamp(display,0.0,1.0);
++    outColor=vec4(uEncodeSRGB!=0 ? display : linearRGB(display),src.a);
+ }
 diff --git a/graphics/postfx/shaders/downsample.frag b/graphics/postfx/shaders/downsample.frag
 index a583bfa..a154693 100644
 --- a/graphics/postfx/shaders/downsample.frag
@@ -3046,11 +4720,14 @@ index a583bfa..a154693 100644
 +    outColor = vec4(sum/max(weight,1e-5), 1.0);
  }
 diff --git a/graphics/postfx/shaders/light_shafts.glsl b/graphics/postfx/shaders/light_shafts.glsl
-index af3588f..5a64d65 100644
+index af3588f..17cf733 100644
 --- a/graphics/postfx/shaders/light_shafts.glsl
 +++ b/graphics/postfx/shaders/light_shafts.glsl
-@@ -3,29 +3,52 @@ uniform vec2 uTexel;
+@@ -1,31 +1,55 @@
+ uniform sampler2D uScene;
+ uniform vec2 uTexel;
  uniform vec4 uSun; // sun UV, shaft strength, flare strength.
++uniform vec2 uRays; // ray length (share of the way to the sun), decay per step
  uniform float uAspect;
  uniform int uDecodeSRGB;
 +#ifdef FX_DEPTH
@@ -3082,6 +4759,7 @@ index af3588f..5a64d65 100644
 -        +highlightAt(uSun.xy-uTexel*vec2(2,0))+highlightAt(uSun.xy+uTexel*vec2(0,2))
 -        +highlightAt(uSun.xy-uTexel*vec2(0,2)))*0.2;
 -    float visibility=smoothstep(0.30,0.90,max(light.r,max(light.g,light.b)));
+-    vec2 delta=(uSun.xy-uv)*(0.88/24.0);
 +    // Visibility = share of open, bright sky in a small disc around the sun.
 +    // Fractional, so the rays fade while the sun slides behind an edge.
 +    vec2 centre=clamp(uSun.xy,vec2(0.002),vec2(0.998));
@@ -3093,11 +4771,11 @@ index af3588f..5a64d65 100644
 +    }
 +    light/=12.0;open/=12.0;
 +    float visibility=smoothstep(0.20,0.85,max(light.r,max(light.g,light.b)))*open;
-     vec2 delta=(uSun.xy-uv)*(0.88/24.0);
++    vec2 delta=(uSun.xy-uv)*(uRays.x/24.0);
      vec2 p=uv;vec3 rays=vec3(0);float decay=1.0;
      for(int i=0;i<24;++i) {
 -        p+=delta;rays+=highlightAt(p)*decay;decay*=0.965;
-+        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=0.965;
++        p+=delta;rays+=highlightAt(clamp(p,vec2(0.001),vec2(0.999)))*decay;decay*=uRays.y;
      }
      vec2 sunDelta=(uv-uSun.xy)*vec2(uAspect,1);
      float halo=exp(-dot(sunDelta,sunDelta)/0.025);
@@ -3110,6 +4788,71 @@ index af3588f..5a64d65 100644
 +    // Soft limit: added light approaches 1 but never washes the frame white.
 +    return glow/(1.0+luma(glow));
  }
+diff --git a/graphics/postfx/shaders/state.frag b/graphics/postfx/shaders/state.frag
+new file mode 100644
+index 0000000..f81817c
+--- /dev/null
++++ b/graphics/postfx/shaders/state.frag
+@@ -0,0 +1,59 @@
++#version 300 es
++precision highp float;
++precision highp sampler2D;
++in highp vec2 vUV;
++layout(location=0) out vec4 outColor;
++// One pixel of slowly changing frame state, ping-ponged between two 1x1
++// targets: r = auto exposure / 4, g = sqrt(focus distance / 1000 m),
++// b = average scene luminance. Read by the composite pass.
++uniform sampler2D uScene;
++uniform sampler2D uDepth;
++uniform sampler2D uSource;   // state of the previous frame
++uniform int uHasDepth;
++uniform int uDecodeSRGB;
++uniform float uClearDepth;
++uniform vec2 uDepthRange;
++uniform mat4 uInvProjection;
++uniform vec4 uAdapt;         // key, min, max, blend (1 = reset)
++uniform vec4 uFocus;         // blend (1 = reset), fallback focus metres
++#include "reference_color.glsl"
++float viewDepthAt(vec2 uv,out bool sky) {
++    float raw=texture(uDepth,uv).r;
++    sky=abs(raw-uClearDepth)<0.0000002;
++    float z=(raw-uDepthRange.x)/(uDepthRange.y-uDepthRange.x)*2.0-1.0;
++    vec4 p=uInvProjection*vec4(uv*2.0-1.0,z,1.0);
++    return abs(p.z/max(abs(p.w),1e-7));
++}
++void main() {
++    // Log-average luminance of an 8x8 grid, centre weighted (HUD-free world).
++    float logSum=0.0,weightSum=0.0;
++    for(int y=0;y<8;++y) for(int x=0;x<8;++x) {
++        vec2 g=(vec2(float(x),float(y))+0.5)/8.0;
++        vec2 uv=mix(vec2(0.08),vec2(0.92),g);
++        vec3 c=texture(uScene,uv).rgb;
++        if(uDecodeSRGB!=0) c=linearRGB(c);
++        vec2 q=uv*2.0-1.0;
++        float w=1.0-0.6*clamp(dot(q,q),0.0,1.0);
++        logSum+=log(max(luma(c),1e-4))*w;weightSum+=w;
++    }
++    float average=exp(logSum/max(weightSum,1e-4));
++    float exposure=clamp(uAdapt.x/max(average,1e-4),uAdapt.y,uAdapt.z);
++
++    float focus=uFocus.y;
++    if(uHasDepth!=0) {
++        float sum=0.0,count=0.0;
++        for(int i=0;i<5;++i) {
++            float a=float(i)*1.2566371;
++            vec2 uv=vec2(0.5)+(i==0 ? vec2(0.0) : vec2(cos(a),sin(a))*0.035);
++            bool sky;float d=viewDepthAt(uv,sky);
++            if(!sky) { sum+=d;count+=1.0; }
++        }
++        focus=count>0.0 ? sum/count : 400.0;
++    }
++    vec4 previous=texture(uSource,vec2(0.5));
++    float oldExposure=previous.r*4.0;
++    float oldFocus=previous.g*previous.g*1000.0;
++    float e=mix(oldExposure,exposure,clamp(uAdapt.w,0.0,1.0));
++    float f=mix(oldFocus,focus,clamp(uFocus.x,0.0,1.0));
++    outColor=vec4(clamp(e*0.25,0.0,1.0),sqrt(clamp(f/1000.0,0.0,1.0)),clamp(average,0.0,1.0),1.0);
++}
 diff --git a/graphics/sun/SunShadowMath.h b/graphics/sun/SunShadowMath.h
 index 092a7e1..87c69fd 100644
 --- a/graphics/sun/SunShadowMath.h
@@ -3297,19 +5040,22 @@ index c18bbf0..6afd346 100644
 +)GLSL";
  }
 diff --git a/graphics/sun/WorldSunShadow.cpp b/graphics/sun/WorldSunShadow.cpp
-index ed216c9..59d21cd 100644
+index ed216c9..0898ff4 100644
 --- a/graphics/sun/WorldSunShadow.cpp
 +++ b/graphics/sun/WorldSunShadow.cpp
-@@ -1,6 +1,8 @@
+@@ -1,6 +1,11 @@
  #include "WorldSunShadow.h"
  #include "SunShadowMath.h"
  #include "SunShadowShaders.h"
 +#include "../RenderThread.h"
 +#include "../../modloader/HookScope.h"
++#include "../GraphicsSettings.h"
++#include "../TextureFilter.h"
++#include "../WorldMsaa.h"
  #include <GLES3/gl3.h>
  #include <android/log.h>
  #include <dlfcn.h>
-@@ -18,12 +20,21 @@ namespace WorldSunShadow {
+@@ -18,12 +23,21 @@ namespace WorldSunShadow {
  namespace {
  using DrawElementsFn=void(GL_APIENTRYP)(GLenum,GLsizei,GLenum,const void*);
  using DrawArraysFn=void(GL_APIENTRYP)(GLenum,GLint,GLsizei);
@@ -3331,7 +5077,7 @@ index ed216c9..59d21cd 100644
  void Toggle(GLenum key,GLboolean enabled) { if(enabled) glEnable(key);else glDisable(key); }
  template<class T> T Proc(const char* name) { return reinterpret_cast<T>(eglGetProcAddress(name)); }
  bool HasExtension(bool es3,const char* name) {
-@@ -98,8 +109,7 @@ struct Caps {
+@@ -98,8 +112,7 @@ struct Caps {
      }
  };
  
@@ -3341,7 +5087,7 @@ index ed216c9..59d21cd 100644
  struct ReplayGuard {
      const Caps& caps;
      GLint draw=0,read=0,viewport[4]{},depthFunction=0;
-@@ -190,6 +200,7 @@ struct FullGuard : ReplayGuard {
+@@ -190,6 +203,7 @@ struct FullGuard : ReplayGuard {
          BlendEquation(GLenum(blendEquationRGB),GLenum(blendEquationAlpha));
      }
  };
@@ -3349,7 +5095,7 @@ index ed216c9..59d21cd 100644
  struct DepthTarget {
      GLuint fbo=0,depth=0,color=0;
      void Destroy() {
-@@ -198,23 +209,83 @@ struct DepthTarget {
+@@ -198,23 +212,83 @@ struct DepthTarget {
          if(color) glDeleteRenderbuffers(1,&color);
          fbo=depth=color=0;
      }
@@ -3439,7 +5185,7 @@ index ed216c9..59d21cd 100644
  GLuint Compile(GLenum kind,const char* source) {
      GLuint shader=glCreateShader(kind);if(!shader) return 0;
      glShaderSource(shader,1,&source,nullptr);glCompileShader(shader);
-@@ -223,66 +294,96 @@ GLuint Compile(GLenum kind,const char* source) {
+@@ -223,66 +297,96 @@ GLuint Compile(GLenum kind,const char* source) {
          SUN_LOG("SUN4 compile failed: %s",message);glDeleteShader(shader);return 0;}
      return shader;
  }
@@ -3550,16 +5296,16 @@ index ed216c9..59d21cd 100644
 +        caps.gen(1,&vao);caps.bind(vao);glGenBuffers(1,&vbo);glBindBuffer(GL_ARRAY_BUFFER,vbo);
 +        glBufferData(GL_ARRAY_BUFFER,sizeof(triangle),triangle,GL_STATIC_DRAW);
 +        glEnableVertexAttribArray(0);glVertexAttribPointer(0,2,GL_FLOAT,GL_FALSE,0,nullptr);
-+        return true;
-+    }
+         return true;
+     }
 +    bool EnsureSun() {
 +        if(sun.fbo&&resolution==config.resolution) return true;
 +        sun.Destroy();
 +        if(!sun.Create(caps,config.resolution,config.resolution,caps.es3)) return false;
 +        resolution=config.resolution;
 +        SUN_LOG("SUN4 sun map ready: %d, radius=%.0f, %s",resolution,config.radius,caps.es3 ? "hardware PCF":"GLES2 PCF");
-         return true;
-     }
++        return true;
++    }
 +    bool EnsureCamera(int w,int h) {
 +        if(camera.fbo&&width==w&&height==h) return true;
 +        camera.Destroy();
@@ -3572,7 +5318,7 @@ index ed216c9..59d21cd 100644
          auto old=programs.find(id);if(old!=programs.end()) return old->second;
          Locations result;GLint uniforms=0;glGetProgramiv(id,GL_ACTIVE_UNIFORMS,&uniforms);
          for(int i=0;i<uniforms;++i) {
-@@ -291,6 +392,7 @@ struct State {
+@@ -291,6 +395,7 @@ struct State {
              if(size!=1||type!=GL_FLOAT_MAT4) continue;
              if(std::strcmp(name,"ViewMatrix")==0) result.view=glGetUniformLocation(id,name);
              if(std::strcmp(name,"ProjMatrix")==0) result.projection=glGetUniformLocation(id,name);
@@ -3580,7 +5326,7 @@ index ed216c9..59d21cd 100644
          }
          programs.emplace(id,result);return result;
      }
-@@ -298,114 +400,195 @@ struct State {
+@@ -298,114 +403,203 @@ struct State {
  using Key=std::pair<EGLDisplay,EGLContext>;
  std::mutex statesMutex;
  std::map<Key,std::shared_ptr<State>> states;
@@ -3639,7 +5385,33 @@ index ed216c9..59d21cd 100644
 +    next->cameraClear=(depthFunction==GL_GREATER||depthFunction==GL_GEQUAL) ? 0.0f:1.0f;
 +    next->haveCamera=true;
 +    BeginWorld(frame);
-+}
+ }
+-template<class Draw> void Capture(Draw draw) {
+-    // The client keeps GTA's native RenderScene. Start from a real perspective
+-    // draw after the EGL frame boundary instead of redirecting RenderScene.
+-    // Reflection/minimap/texture FBOs with a different viewport are excluded.
+-    if(!replaying&&hooksReady.load()&&!active&&automatic&&automatic->armed) {
+-        auto next=automatic;
+-        if(eglGetCurrentContext()!=next->owner||eglGetCurrentSurface(EGL_DRAW)!=next->surface) return;
+-        GLboolean write=0;glGetBooleanv(GL_DEPTH_WRITEMASK,&write);
+-        GLint viewport[4]{},id=0,framebuffer=0;glGetIntegerv(GL_VIEWPORT,viewport);
+-        glGetIntegerv(GL_FRAMEBUFFER_BINDING,&framebuffer);
+-        if(!write||!glIsEnabled(GL_DEPTH_TEST)||framebuffer!=next->expectedFramebuffer||
+-           std::memcmp(viewport,next->expectedViewport,sizeof(viewport))!=0) return;
+-        glGetIntegerv(GL_CURRENT_PROGRAM,&id);if(!id) return;
+-        const auto location=next->Find(GLuint(id));
+-        if(location.view<0||location.projection<0) return;
+-        float view[16],projection[16],inverse[16],forward=0;
+-        glGetUniformfv(GLuint(id),location.view,view);glGetUniformfv(GLuint(id),location.projection,projection);
+-        if(!EglPostFX::Math::Projection(projection,inverse,forward)||!EglPostFX::Math::Invert(view,inverse)) return;
+-        auto frame=next->queued;
+-        // Use this draw's camera; do not use last frame's position after a
+-        // vehicle transition, teleport, camera cut, or first-person switch.
+-        for(int i=0;i<3;++i) frame.focus[i]=inverse[12+i]+inverse[8+i]*forward*22.0f;
+-        next->armed=false;BeginWorld(frame);
+-    }
+-    auto s=active;
+-    if(replaying||!hooksReady.load()||!s||!s->active||!s->valid||s->retired.load()) return;
 +// One replayed caster. Only state that differs from the game's draw is
 +// touched; the destructor puts back exactly what the game had set.
 +struct CasterGuard {
@@ -3688,33 +5460,7 @@ index ed216c9..59d21cd 100644
 +    const float y=m[1]*t[0]+m[5]*t[1]+m[9]*t[2]+m[13];
 +    // Orthographic: w == 1. 2.2 = the map plus 1.2 radii of margin for large objects.
 +    return std::abs(x)>2.2f||std::abs(y)>2.2f;
- }
--template<class Draw> void Capture(Draw draw) {
--    // The client keeps GTA's native RenderScene. Start from a real perspective
--    // draw after the EGL frame boundary instead of redirecting RenderScene.
--    // Reflection/minimap/texture FBOs with a different viewport are excluded.
--    if(!replaying&&hooksReady.load()&&!active&&automatic&&automatic->armed) {
--        auto next=automatic;
--        if(eglGetCurrentContext()!=next->owner||eglGetCurrentSurface(EGL_DRAW)!=next->surface) return;
--        GLboolean write=0;glGetBooleanv(GL_DEPTH_WRITEMASK,&write);
--        GLint viewport[4]{},id=0,framebuffer=0;glGetIntegerv(GL_VIEWPORT,viewport);
--        glGetIntegerv(GL_FRAMEBUFFER_BINDING,&framebuffer);
--        if(!write||!glIsEnabled(GL_DEPTH_TEST)||framebuffer!=next->expectedFramebuffer||
--           std::memcmp(viewport,next->expectedViewport,sizeof(viewport))!=0) return;
--        glGetIntegerv(GL_CURRENT_PROGRAM,&id);if(!id) return;
--        const auto location=next->Find(GLuint(id));
--        if(location.view<0||location.projection<0) return;
--        float view[16],projection[16],inverse[16],forward=0;
--        glGetUniformfv(GLuint(id),location.view,view);glGetUniformfv(GLuint(id),location.projection,projection);
--        if(!EglPostFX::Math::Projection(projection,inverse,forward)||!EglPostFX::Math::Invert(view,inverse)) return;
--        auto frame=next->queued;
--        // Use this draw's camera; do not use last frame's position after a
--        // vehicle transition, teleport, camera cut, or first-person switch.
--        for(int i=0;i<3;++i) frame.focus[i]=inverse[12+i]+inverse[8+i]*forward*22.0f;
--        next->armed=false;BeginWorld(frame);
--    }
--    auto s=active;
--    if(replaying||!hooksReady.load()||!s||!s->active||!s->valid||s->retired.load()) return;
++}
 +template<class Draw> void Capture(Draw draw,GLsizei count) {
 +    if(replaying||!hooksReady.load(std::memory_order_acquire)) return;
 +    if(!active&&automatic&&automatic->armed) TryBegin();
@@ -3853,6 +5599,14 @@ index ed216c9..59d21cd 100644
 +WorldEndSlot worldEndSlots[8];
 +std::atomic<unsigned> worldEndCursor{0};
 +void RunWorldEnd(void* argument) {
++    // Once, on GTA's render thread with its context: what the GPU can do.
++    static bool deviceChecked=false;
++    if(!deviceChecked && eglGetCurrentContext()!=EGL_NO_CONTEXT) {
++        deviceChecked=true;
++        GraphicsSettings::SetGpu(reinterpret_cast<const char*>(glGetString(GL_RENDERER)));
++        TextureFilter::CheckDevice();
++        WorldMsaa::CheckDevice();
++    }
 +    auto* slot=static_cast<WorldEndSlot*>(argument);
 +    const Frame next=slot->next;
 +    slot->busy.store(false,std::memory_order_release);
@@ -3860,7 +5614,7 @@ index ed216c9..59d21cd 100644
  }
  }
  
-@@ -413,7 +596,7 @@ bool InstallDrawHooks(HookBackend backend) {
+@@ -413,7 +607,7 @@ bool InstallDrawHooks(HookBackend backend) {
      static std::once_flag once;
      std::call_once(once,[&] {
          if(!backend) return;
@@ -3869,7 +5623,7 @@ index ed216c9..59d21cd 100644
          void* gl=dlopen("libGLESv2.so",RTLD_NOW|RTLD_LOCAL);
          if(!gl) {SUN_LOG("SUN4 draw hooks unavailable: %s",dlerror());return;}
          void* elements=dlsym(gl,"glDrawElements"),*arrays=dlsym(gl,"glDrawArrays");
-@@ -424,61 +607,96 @@ bool InstallDrawHooks(HookBackend backend) {
+@@ -424,61 +618,100 @@ bool InstallDrawHooks(HookBackend backend) {
          if(!backend(arrays,reinterpret_cast<void*>(&HookArrays),reinterpret_cast<void**>(&originalArrays))||!originalArrays) {
              SUN_LOG("SUN4 glDrawArrays hook failed; installed hooks stay pass-through");return;
          }
@@ -3933,6 +5687,10 @@ index ed216c9..59d21cd 100644
 +        s->resolutionCap=s->maxTexture>=512 ? std::min(4096,s->maxTexture):4096;
 +    }
 +    config.resolution=std::min(config.resolution,s->resolutionCap);
++    // Adaptive quality (low FPS): fewer casters, smaller map, then no sun shadow.
++    const int adaptive=GraphicsSettings::AdaptiveLevel();
++    if(adaptive>=2) { config.maxDraws=config.maxDraws*3/5;config.resolution=std::min(config.resolution,1024); }
++    if(adaptive>=3) config.enabled=false;
      // Resource setup changes program/vertex bindings. Do not enter it inside
      // transform feedback or a query, even for the first automatic world draw.
 -    if(s->caps.es3) {
@@ -3994,7 +5752,7 @@ index ed216c9..59d21cd 100644
  }
  void BeginWorld(const Frame& frame) {
      try {BeginWorldImpl(frame);}
-@@ -493,18 +711,41 @@ void QueueFrame(const Frame& frame) {
+@@ -493,18 +726,41 @@ void QueueFrame(const Frame& frame) {
          {std::lock_guard<std::mutex> lock(statesMutex);auto& slot=states[{display,context}];
              if(!slot) slot=std::make_shared<State>();s=slot;}
          s->queued=frame;s->owner=context;s->surface=eglGetCurrentSurface(EGL_DRAW);
@@ -4041,7 +5799,7 @@ index ed216c9..59d21cd 100644
  void EndWorld() {
      auto s=active;active.reset();
      if(!s) {
-@@ -514,32 +755,92 @@ void EndWorld() {
+@@ -514,32 +770,92 @@ void EndWorld() {
          return;
      }
      s->active=false;
@@ -4263,7 +6021,7 @@ index 6021e91..5f4db6a 100644
  	RwIm2DVertex* vtx_dst = g_pVB;
  	int vtx_offset = 0;
 diff --git a/java_systems/ModernMenu.cpp b/java_systems/ModernMenu.cpp
-index 6ed70ef..70cde77 100644
+index 6ed70ef..fa32f6d 100644
 --- a/java_systems/ModernMenu.cpp
 +++ b/java_systems/ModernMenu.cpp
 @@ -21,6 +21,10 @@
@@ -4396,7 +6154,7 @@ index 6ed70ef..70cde77 100644
 +        data[base + 0] = GraphicsSettings::Get(i);
 +        data[base + 1] = GraphicsSettings::Min(i);
 +        data[base + 2] = GraphicsSettings::Max(i);
-+        data[base + 3] = 1;
++        data[base + 3] = GraphicsSettings::Visible(i) ? 1 : 0;
 +    }
 +    jintArray array = env->NewIntArray(kCount * 4);
 +    if (array) env->SetIntArrayRegion(array, 0, kCount * 4, data);
@@ -4747,6 +6505,18 @@ index e46ffeb..a24cdae 100644
      CPickupPool::Free();
      CGangZonePool::Free();
      CText3DLabelsPool::Free();
+diff --git a/net/objectpool.cpp b/net/objectpool.cpp
+index 6dfb059..0f4cbd2 100644
+--- a/net/objectpool.cpp
++++ b/net/objectpool.cpp
+@@ -113,6 +113,7 @@ void CObjectPool::Process()
+ void CObjectPool::ProcessMaterialText()
+ {
+ 	// Alyn: every frame, right after CObjectPool::Process() in CGame::Process.
++	CObjectSamp::BeginMaterialTextTick();
+ 	for (auto &pair : list) {
+ 		if (pair.second) pair.second->ProcessMaterialText();
+ 	}
 diff --git a/net/scriptrpc.cpp b/net/scriptrpc.cpp
 index a8d4c2b..94bd0d2 100644
 --- a/net/scriptrpc.cpp
