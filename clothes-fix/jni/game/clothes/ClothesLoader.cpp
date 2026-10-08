@@ -1,6 +1,6 @@
 #include "ClothesLoader.h"
 #include "../character/CharacterTexture.h"
-#include <android/log.h>
+#include "../character/CharacterLog.h"
 #include <cstring>
 #include <cstdio>
 #include <cmath>
@@ -112,10 +112,10 @@ TexturePtr ClothesLoader::Texture(const std::string& name) {
     // Read by full path (see CharacterTexture.h): RtPNGImageRead opened "<storage>/<root>/..." here.
     std::vector<uint8_t> rgba;int width=0,height=0;std::string error;
     if(!ReadPng(root_+"/"+definition->file,512,rgba,width,height,error)) {
-        __android_log_print(ANDROID_LOG_ERROR,"EagleCharacter","texture %s: %s",name.c_str(),error.c_str());return {};
+        LogLine(ANDROID_LOG_ERROR,"texture %s: %s",name.c_str(),error.c_str());return {};
     }
     TexturePtr texture(CreateRgbaTexture(rgba.data(),width,height),TextureDeleter{});
-    if(!texture) {__android_log_print(ANDROID_LOG_ERROR,"EagleCharacter","texture %s: no 32-bit raster for %dx%d",name.c_str(),width,height);return {};}
+    if(!texture) {LogLine(ANDROID_LOG_ERROR,"texture %s: no 32-bit raster for %dx%d",name.c_str(),width,height);return {};}
     std::snprintf(texture->name,sizeof(texture->name),"%s",name.c_str());
     texture->filterAddressing=rwFILTERLINEAR|(rwTEXTUREADDRESSCLAMP<<8)|(rwTEXTUREADDRESSCLAMP<<12);
     auto& rw=RenderWareApi::Get();if(!dictionary_) dictionary_=rw.createDictionary();if(!dictionary_) return {};

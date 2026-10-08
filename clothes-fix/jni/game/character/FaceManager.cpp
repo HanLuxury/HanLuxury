@@ -1,6 +1,6 @@
 #include "FaceManager.h"
 #include "CharacterTexture.h"
-#include <android/log.h>
+#include "CharacterLog.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -20,7 +20,7 @@ TexturePtr FaceManager::Get(const PlayerAppearance& a,bool face) {
     // Read by full path (see CharacterTexture.h): RtPNGImageRead opened "<storage>/<root>/..." here.
     std::vector<uint8_t> pixels;int w=0,h=0;std::string error;
     if(!ReadPng(root_+"/character/textures/"+name+".png",512,pixels,w,h,error)) {
-        __android_log_print(ANDROID_LOG_ERROR,"EagleCharacter","overlay %s: %s",name.c_str(),error.c_str());return {};
+        LogLine(ANDROID_LOG_ERROR,"overlay %s: %s",name.c_str(),error.c_str());return {};
     }
     // Sample texture UV contract: front is centred on u .25, v .25..80.
     // Multiplicative details keep skin tone identical across the neck seam.

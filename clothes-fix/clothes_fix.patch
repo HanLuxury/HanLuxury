@@ -1,0 +1,519 @@
+diff -ruN a/README_INSTALL.md b/README_INSTALL.md
+--- a/README_INSTALL.md	2026-10-08 00:08:53.559258200 +0000
++++ b/README_INSTALL.md	2026-10-08 00:08:53.561305328 +0000
+@@ -40,6 +40,40 @@
+ - Penulisan saldo, skin, dan gender yang relevan memakai epoch guard agar snapshot async lama tidak menimpa transaksi clothes.
+ - Sistem ShadowHook yang sudah ada tetap menggunakan scope sesuai mode. Offset GTA dan binary libGTASA tidak diubah.
+ 
++## Perbaikan: tekstur karakter "file not found" (path TESTLIT ganda)
++
++Gejala di log:
++
++```
++NVFOpen hook | Error: file not found (/storage/emulated/0/TESTLIT//storage/emulated/0/TESTLIT/character/textures/user_eg_skin_m.png)
++```
++
++Penyebab: `ClothesLoader` dan `FaceManager` membaca PNG dengan `RtPNGImageRead(<path lengkap>)`. Fungsi itu membuka file lewat `NvFOpen` milik game, dan `BuildGameFilePath` selalu menaruh root storage di depan nama file, sehingga root tertulis dua kali. Semua tekstur gagal, semua aset (body, face, hair, top, pants, shoes) ditolak, karakter tidak pernah siap, dan client mencoba ulang tiap 6 detik.
++
++Yang diubah:
++
++- `jni/game/character/CharacterTexture.h/.cpp` (baru): PNG dibaca langsung dari path lengkap dengan stb_image (sudah dikompilasi di `main.cpp`), lalu dibuat raster 32-bit seukuran gambar. Tidak lagi lewat `NvFOpen`/`RtPNGImageRead`/`RwImageFindRasterFormat`. Jika driver membulatkan ukuran raster, gambar diregangkan ke seluruh raster agar UV tetap pas (tekstur 384x512, 512x509, 104x104).
++- `jni/game/clothes/ClothesLoader.cpp` dan `jni/game/character/FaceManager.cpp`: memakai loader baru. Kegagalan dicatat beserta path dan alasannya. Overlay wajah/kulit tidak lagi di-pad ke power-of-two, karena padding menggeser UV skin 104x104.
++- `jni/game/hooks.cpp`: `BuildGameFilePath` tidak menambahkan root storage pada path yang sudah diawali root itu.
++
++## Perbaikan: alur ganti pakaian dari server sampai ped
++
++- **Log terlihat di log client.** Semua pesan `EagleCharacter` kini juga masuk `Log()` (logcat tag `AXL` dan `log.txt`), bukan hanya logcat. Titik yang dulu gagal diam-diam sekarang menulis alasannya: aset gagal dimuat, clone/skin gagal, skeleton tidak cocok dengan ped carrier, clothes tidak tergambar, creator menunggu appearance dari server. Saat berhasil muncul `player <id>: <n> parts on ped model 158/298`.
++- **Server tidak lagi menendang pemain untuk penolakan biasa.** `eagle_commit_appearance` yang menjawab `insufficient_money`, `already_owned`, `not_owned_or_incompatible`, `price_changed`, `unavailable_item`, `purchase_not_equipped` atau `invalid_appearance` sudah melakukan ROLLBACK dan tidak mengubah apa pun. Pemain mendapat pesan dan bisa mencoba lagi. Hasil yang tidak pasti (tidak ada jawaban, `stale_revision`, `database_error`) tetap kick seperti sebelumnya.
++- **Simpan/beli selalu dijawab.** Dulu save/buy saat belum berjalan kaki, dalam jeda 500 ms, atau mengubah tattoo/freckles di luar creator dibuang tanpa balasan, sehingga menu macet di "Menyimpan…". Sekarang server mengirim pesan.
++
++## Pemeriksaan (host, bukan perangkat)
++
++- 30 PNG TESTLIT terbaca dan byte RGBA-nya identik dengan Pillow. Pembuatan raster ukuran persis, dibulatkan, dan stride lebar bersih di AddressSanitizer/UBSan tanpa raster bocor.
++- Katalog client (`character.json`/`clothes.json`), `character_catalog.inc`, dan baris SQL di 001/003 cocok untuk 160 item (slot, harga, body mask). Urutan 22 field sama di CEF, JNI, server, dan procedure SQL. Thumbnail CEF lengkap.
++- `CharacterCatalog` client memuat TESTLIT, menerima 960 kombinasi item × bentuk tubuh, dan membaca paket appearance persis seperti yang ditulis `EC_SendAppearance`.
++- `BuildRetarget` asli berhasil untuk 324 DFF ke skeleton `cwmofr` dan `cat` (PED_IMPORT).
++- `cefui/index.html` asli dijalankan di Chromium: creator → simpan, toko → beli, lemari → hanya item dimiliki. Payload lolos port `EC_Parse`/`EC_Validate` dan berada di bawah batas 1024 byte JNI.
++- Fungsi Pawn yang diubah dikompilasi pawncc 3.10.10 dengan stub, tanpa error/warning. File C++ yang diubah lolos cek sintaks clang 18.
++- Belum: build NDK, compile gamemode lengkap, dan uji di HP.
++
++Setelah build baru, baris `TESTLIT//storage/...` tidak boleh muncul lagi. Jika pakaian tidak tampil atau masih FC, kirim baris `EagleCharacter` dari log client dan `adb logcat -b crash -d`.
++
+ ## FC signal 6 yang Anda kirim
+ 
+ Statusnya **belum teridentifikasi secara pasti**. `libc.so (abort)` berarti proses dihentikan lewat abort, tetapi log singkat itu tidak memuat pesan penyebabnya. `libmultiplayer.so+0x236a74` perlu disimbolkan dengan **libmultiplayer.so persis dari APK yang mengalami crash**. LibGTASA saja tidak dapat memetakan alamat milik library client. Jangan memakai alamat build lama untuk binary hasil build baru ini.
+diff -ruN a/gamemodes/SERVER/player/character/character_system.inc b/gamemodes/SERVER/player/character/character_system.inc
+--- a/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 00:08:53.569840928 +0000
++++ b/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 00:08:53.571877706 +0000
+@@ -252,6 +252,26 @@
+     }
+     return false;
+ }
++/* Reasons from eagle_commit_appearance that leave the database untouched. stale_revision,
++   database_error and a missing answer stay fatal: the saved state is then unknown. */
++stock bool:EC_IsCleanRejection(const reason[])
++{
++    if(reason[0]==EOS) return false;
++    return !strcmp(reason,"invalid_appearance") || !strcmp(reason,"unavailable_item") || !strcmp(reason,"price_changed")
++        || !strcmp(reason,"already_owned") || !strcmp(reason,"purchase_not_equipped") || !strcmp(reason,"insufficient_money")
++        || !strcmp(reason,"not_owned_or_incompatible");
++}
++stock EC_RejectionText(const reason[])
++{
++    new text[96];
++    if(!strcmp(reason,"insufficient_money")) text="Uang Anda tidak cukup.";
++    else if(!strcmp(reason,"already_owned")) text="Pakaian ini sudah Anda miliki.";
++    else if(!strcmp(reason,"not_owned_or_incompatible")) text="Ada pakaian yang belum dimiliki atau tidak cocok dengan bentuk tubuh.";
++    else if(!strcmp(reason,"price_changed")) text="Harga di database berbeda dengan gamemode. Hubungi admin.";
++    else if(!strcmp(reason,"unavailable_item")) text="Pakaian ini tidak tersedia di katalog database. Hubungi admin.";
++    else text="Pilihan ditolak server. Coba lagi.";
++    return text;
++}
+ stock EC_Commit(playerid,const look[EC_FIELDS],buy=0)
+ {
+     if(!gECLoaded[playerid] || !EC_Validate(look)) return 0;
+@@ -277,13 +297,21 @@
+     // cannot run between the validated cash snapshot and its commit result.
+     // Legacy async wallet writes carry an epoch guard (see integration patch).
+     new Cache:result=mysql_query(g_SQL,query,true);
+-    new rows=0,ok=0,cash=0,epoch=0,revision=0;
++    new rows=0,ok=0,cash=0,epoch=0,revision=0,reason[32];
+     if(result!=Cache:0)
+     {
+         cache_get_row_count(rows);if(rows) cache_get_value_name_int(0,"ok",ok);
+         if(ok) {cache_get_value_name_int(0,"cash",cash);cache_get_value_name_int(0,"epoch",epoch);cache_get_value_name_int(0,"revision",revision);}
++        else if(rows) cache_get_value_name(0,"reason",reason);
+         cache_delete(result);
+     }
++    // These answers come after ROLLBACK and change nothing: wallet, inventory and
++    // revision are the same as before, so the player stays and can try again.
++    if(!ok && EC_IsCleanRejection(reason))
++    {
++        printf("[EagleCharacter] commit refused account=%d rev=%d buy=%d reason=%s",AccountData[playerid][pID],gECRevision[playerid],buy,reason);
++        return EC_Notice(playerid,EC_RejectionText(reason));
++    }
+     if(!ok)
+     {
+         // An interrupted connection after COMMIT is ambiguous. Never guess or
+@@ -304,9 +332,12 @@
+ stock EC_OnUI(playerid,const action[],item,const text[])
+ {
+     if(!strcmp(action,"close")) return EC_Close(playerid);
+-    if(!gECOpen[playerid] || !gECLoaded[playerid] || !AccountData[playerid][IsLoggedIn] || GetPlayerState(playerid)!=PLAYER_STATE_ONFOOT) return 1;
+-    if(strcmp(action,"save") && strcmp(action,"buy")) return 1;
+-    if(GetTickCount()-gECLastAction[playerid]<500) return 1;gECLastAction[playerid]=GetTickCount();
++    if(action[0]==EOS || (strcmp(action,"save") && strcmp(action,"buy")) || !gECOpen[playerid]) return 1;
++    // The menu shows "Menyimpan..." until it hears back: every save/buy gets an answer.
++    if(!gECLoaded[playerid] || !AccountData[playerid][IsLoggedIn]) return EC_Notice(playerid,"Karakter sedang dimuat. Coba lagi.");
++    if(GetPlayerState(playerid)!=PLAYER_STATE_ONFOOT) return EC_Notice(playerid,"Simpan pakaian saat berjalan kaki.");
++    if(GetTickCount()-gECLastAction[playerid]<500) return EC_Notice(playerid,"Tunggu sebentar, lalu coba lagi.");
++    gECLastAction[playerid]=GetTickCount();
+     new data[24],look[EC_FIELDS];
+     if(!EC_Parse(text,data) || data[0]!=gECNonce[playerid] || data[1]!=gECRevision[playerid]) {EC_UIState(playerid);return EC_Notice(playerid,"Sesi berubah. Coba pilihan Anda lagi.");}
+     for(new i=0;i<EC_FIELDS;i++) look[i]=data[i+2];
+@@ -314,7 +345,7 @@
+     if(!gECCreator[playerid])
+     {
+         for(new f=0;f<9;f++) if(look[f]!=gECLook[playerid][f]) return EC_Notice(playerid,"Gunakan character creator untuk mengubah tubuh/wajah.");
+-        if(look[20]!=gECLook[playerid][20] || look[21]!=gECLook[playerid][21]) return 1;
++        if(look[20]!=gECLook[playerid][20] || look[21]!=gECLook[playerid][21]) return EC_Notice(playerid,"Gunakan character creator untuk mengubah tattoo/freckles.");
+     }
+     if(!strcmp(action,"buy"))
+     {
+diff -ruN a/jni/game/character/CharacterLog.h b/jni/game/character/CharacterLog.h
+--- a/jni/game/character/CharacterLog.h	1970-01-01 00:00:00.000000000 +0000
++++ b/jni/game/character/CharacterLog.h	2026-10-08 00:08:53.580482240 +0000
+@@ -0,0 +1,13 @@
++#pragma once
++#include <android/log.h>
++#include <cstdarg>
++#include <cstdio>
++void Log(const char* fmt,...); // main.cpp: logcat "AXL", crashlytics and log.txt
++namespace Eagle::Character {
++// Logcat tag "EagleCharacter" and the client's own log, where players look first.
++// Game thread only: Log() formats into one shared buffer.
++inline void LogLine(int priority,const char* fmt,...) {
++    char line[400];va_list args;va_start(args,fmt);std::vsnprintf(line,sizeof(line),fmt,args);va_end(args);
++    __android_log_write(priority,"EagleCharacter",line);Log("EagleCharacter: %s",line);
++}
++}
+diff -ruN a/jni/game/character/CharacterManager.cpp b/jni/game/character/CharacterManager.cpp
+--- a/jni/game/character/CharacterManager.cpp	2026-10-08 00:08:53.587923590 +0000
++++ b/jni/game/character/CharacterManager.cpp	2026-10-08 00:08:53.590021920 +0000
+@@ -9,7 +9,7 @@
+ #include "java_systems/cef/CEF.h"
+ #include "json.hpp"
+ #include <EGL/egl.h>
+-#include <android/log.h>
++#include "CharacterLog.h"
+ #include <chrono>
+ #include <deque>
+ #include <mutex>
+@@ -41,7 +41,10 @@
+     if(action=="cancel") {StopPreview();return;}
+     if(action=="catalog") {CCEF::GetEvent("eagle_character_catalog",s.catalog.UiJson());return;}
+     const auto id=CPlayerPool::GetLocalPlayerID();auto found=s.confirmed.find(id);
+-    if(found==s.confirmed.end()||!found->second.enabled) return;
++    if(found==s.confirmed.end()||!found->second.enabled) {
++        if(action=="begin") LogLine(ANDROID_LOG_WARN,"creator waits: no appearance from the server yet for player %u",unsigned(id));
++        return;
++    }
+     if(action=="begin") {
+         s.preview=true;s.shop=j.value("mode",std::string())=="shop";s.draft=found->second.appearance;s.angle=0;s.distance=2.8f;s.height=.4f;s.lastReady=-1;
+         CCEF::GetEvent("eagle_character_catalog",s.catalog.UiJson());
+@@ -111,12 +114,12 @@
+             }
+         } else error="required RenderWare exports unavailable";
+         if(!loaded) {
+-            __android_log_print(ANDROID_LOG_ERROR,"EagleCharacter","init deferred at %s: %s",root.c_str(),error.c_str());
++            LogLine(ANDROID_LOG_ERROR,"init deferred at %s: %s",root.c_str(),error.c_str());
+             Emit("eagle_character_error",{{"message","Aset karakter belum siap. Periksa character.json, clothes.json, dan folder karakter di TESTLIT."}});
+             return;
+         }
+         s.faces=std::make_unique<FaceManager>(root);s.streaming=std::make_unique<ClothesStreaming>(root,s.catalog);
+-        __android_log_print(ANDROID_LOG_INFO,"EagleCharacter","catalog ready revision %u at %s",s.catalog.Revision(),root.c_str());
++        LogLine(ANDROID_LOG_INFO,"catalog ready revision %u at %s",s.catalog.Revision(),root.c_str());
+     }
+     s.streaming->Tick(now);
+     std::deque<std::string> events;{std::lock_guard<std::mutex> lock(queueMutex);events.swap(queue);}
+@@ -125,7 +128,7 @@
+     for(const auto& pair:s.confirmed) {
+         auto* ped=Ped(pair.first);auto it=s.players.find(pair.first);
+         if(!ped||!pair.second.enabled) {if(it!=s.players.end()) {it->second->DetachCurrent(ped);s.players.erase(it);}continue;}
+-        if(it==s.players.end()) it=s.players.emplace(pair.first,std::make_unique<CharacterPlayer>(s.catalog,*s.streaming,*s.faces)).first;
++        if(it==s.players.end()) it=s.players.emplace(pair.first,std::make_unique<CharacterPlayer>(pair.first,s.catalog,*s.streaming,*s.faces)).first;
+         it->second->Request(s.preview&&pair.first==local ? s.draft:pair.second.appearance);it->second->Tick(ped);
+     }
+     if(s.preview) {
+diff -ruN a/jni/game/character/CharacterPlayer.cpp b/jni/game/character/CharacterPlayer.cpp
+--- a/jni/game/character/CharacterPlayer.cpp	2026-10-08 00:08:53.597630835 +0000
++++ b/jni/game/character/CharacterPlayer.cpp	2026-10-08 00:08:53.599433176 +0000
+@@ -5,14 +5,14 @@
+ #include "game/Entity/Ped/Ped.h"
+ #include "ClothesSystem.h"
+ #include <unordered_map>
+-#include <android/log.h>
++#include "CharacterLog.h"
+ #include <chrono>
+ namespace Eagle::Character {
+ namespace {
+ std::unordered_map<RpAtomic*,CharacterPlayer*> owners;
+ uint64_t Clock() {return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());}
+ }
+-CharacterPlayer::CharacterPlayer(const CharacterCatalog& c,ClothesStreaming& s,FaceManager& f):catalog_(c),streaming_(s),faces_(f) {}
++CharacterPlayer::CharacterPlayer(uint16_t id,const CharacterCatalog& c,ClothesStreaming& s,FaceManager& f):id_(id),catalog_(c),streaming_(s),faces_(f) {}
+ CharacterPlayer::~CharacterPlayer() {Detach(false);}
+ void CharacterPlayer::DetachCurrent(CPed* livePed) {
+     Detach(livePed&&livePed==ped_&&livePed->m_pRwClump==hookedClump_);
+@@ -23,7 +23,10 @@
+     requested_=look;requestedValid_=true;loading_=true;pending_.clear();
+     for(const auto& key:catalog_.Required(look)) pending_.push_back(streaming_.Acquire(key));
+ }
+-void CharacterPlayer::Failed() {loading_=false;pending_.clear();requestedValid_=false;retryAfter_=Clock()+6000;}
++void CharacterPlayer::Failed(const char* why) {
++    LogLine(ANDROID_LOG_ERROR,"player %u: %s; keeping the previous look, retry in 6 s",unsigned(id_),why);
++    loading_=false;pending_.clear();requestedValid_=false;retryAfter_=Clock()+6000;
++}
+ void CharacterPlayer::Detach(bool nativeAlive) {
+     for(const auto& old:originals_) {
+         owners.erase(old.atomic);
+@@ -43,15 +46,12 @@
+     ped_=ped;
+     if(loading_) {
+         for(const auto& t:pending_) {
+-            if(!t||t->state==AssetTicket::State::Failed) {
+-                Failed();
+-                __android_log_print(ANDROID_LOG_ERROR,"EagleCharacter","appearance load failed; retaining previous ped");return;
+-            }
++            if(!t||t->state==AssetTicket::State::Failed) {Failed(t ? "an asset failed to load (see the asset line above)":"asset queue full");return;}
+             if(t->state!=AssetTicket::State::Ready) return;
+         }
+         std::vector<std::unique_ptr<ClothesRenderer>> next;
+         const auto required=catalog_.Required(requested_);const auto bodyKey=catalog_.BodyKey(requested_);
+-        if(required.size()!=pending_.size()) {Failed();return;}
++        if(required.size()!=pending_.size()) {Failed("catalog changed while loading");return;}
+         for(size_t index=0;index<pending_.size();++index) {
+             Colour tint{};
+             for(int slot=1;slot<int(Slot::Count);++slot) {
+@@ -59,12 +59,12 @@
+                 if(item&&item->variants.at(bodyKey)==required[index]) {tint=item->tint;break;}
+             }
+             auto part=std::make_unique<ClothesRenderer>(pending_[index],tint);
+-            if(!part->Initialise()) {Failed();return;}
++            if(!part->Initialise()) {Failed(("cannot clone/skin asset "+required[index]).c_str());return;}
+             next.push_back(std::move(part));
+         }
+         auto* frame=RpClumpGetFrame(ped->m_pRwClump);if(!frame) return;
+         auto* root=RwFrameGetLTM(frame);if(!root) return;
+-        for(auto& p:next) if(!p->Prepare(ped->m_pRwClump,*root)) {Failed();return;}
++        for(auto& p:next) if(!p->Prepare(ped->m_pRwClump,*root)) {Failed("skeleton does not map onto the carrier ped");return;}
+         parts_=std::move(next);active_=requested_;pending_.clear();loading_=false;
+         hidden_=ClothesManager::HiddenRegions(catalog_,active_);
+         face_=faces_.Get(active_,true);body_=faces_.Get(active_,false);
+@@ -76,7 +76,8 @@
+     // Allocate all bookkeeping before touching callbacks.
+     originals_.reserve(atomics.size());owners.reserve(owners.size()+atomics.size());
+     for(auto* atomic:atomics) originals_.push_back({atomic,atomic->renderCallBack});
+-    hookedClump_=ped->m_pRwClump;
++    hookedClump_=ped->m_pRwClump;drawLogged_=false;
++    LogLine(ANDROID_LOG_INFO,"player %u: %zu parts on ped model %d",unsigned(id_),parts_.size(),int(ped->m_nModelIndex));
+     for(const auto& old:originals_) {owners[old.atomic]=this;old.atomic->renderCallBack=RenderHook;}
+ }
+ bool CharacterPlayer::Draw() {
+@@ -91,7 +92,10 @@
+ RpAtomic* CharacterPlayer::RenderHook(RpAtomic* atomic) {
+     auto found=owners.find(atomic);if(found==owners.end()) return AtomicDefaultRenderCallBack(atomic);
+     auto& owner=*found->second;
+-    if(atomic==owner.originals_.front().atomic) owner.drawOK_=owner.Draw();
++    if(atomic==owner.originals_.front().atomic) {
++        owner.drawOK_=owner.Draw();
++        if(!owner.drawOK_&&!owner.drawLogged_) {owner.drawLogged_=true;LogLine(ANDROID_LOG_ERROR,"player %u: clothes not drawn this frame, showing the native ped",unsigned(owner.id_));}
++    }
+     if(!owner.drawOK_) for(const auto& old:owner.originals_) if(old.atomic==atomic)
+         return old.callback ? old.callback(atomic):AtomicDefaultRenderCallBack(atomic);
+     return atomic;
+diff -ruN a/jni/game/character/CharacterPlayer.h b/jni/game/character/CharacterPlayer.h
+--- a/jni/game/character/CharacterPlayer.h	2026-10-08 00:08:53.606583579 +0000
++++ b/jni/game/character/CharacterPlayer.h	2026-10-08 00:08:53.608704644 +0000
+@@ -5,7 +5,7 @@
+ namespace Eagle::Character {
+ class CharacterPlayer {
+ public:
+-    CharacterPlayer(const CharacterCatalog& catalog,ClothesStreaming& streaming,FaceManager& faces);
++    CharacterPlayer(uint16_t playerId,const CharacterCatalog& catalog,ClothesStreaming& streaming,FaceManager& faces);
+     ~CharacterPlayer();
+     void Request(const PlayerAppearance& look);
+     void Tick(CPed* ped);
+@@ -17,11 +17,11 @@
+     struct Original {RpAtomic* atomic;RpAtomicCallBackRender callback;};
+     static RpAtomic* RenderHook(RpAtomic* atomic);
+     bool Draw();
+-    void Failed();
+-    const CharacterCatalog& catalog_;ClothesStreaming& streaming_;FaceManager& faces_;
++    void Failed(const char* why);
++    uint16_t id_;const CharacterCatalog& catalog_;ClothesStreaming& streaming_;FaceManager& faces_;
+     CPed* ped_=nullptr;RpClump* hookedClump_=nullptr;
+     std::vector<Original> originals_;
+-    PlayerAppearance requested_,active_;bool requestedValid_=false,loading_=false,drawOK_=false;
++    PlayerAppearance requested_,active_;bool requestedValid_=false,loading_=false,drawOK_=false,drawLogged_=false;
+     std::vector<std::shared_ptr<AssetTicket>> pending_;
+     std::vector<std::unique_ptr<ClothesRenderer>> parts_;
+     TexturePtr face_,body_;uint16_t hidden_=0;
+diff -ruN a/jni/game/character/CharacterRenderWare.cpp b/jni/game/character/CharacterRenderWare.cpp
+--- a/jni/game/character/CharacterRenderWare.cpp	2026-10-08 00:08:53.615940971 +0000
++++ b/jni/game/character/CharacterRenderWare.cpp	2026-10-08 00:08:53.617924324 +0000
+@@ -1,6 +1,6 @@
+ #include "CharacterRenderWare.h"
+ #include <dlfcn.h>
+-#include <android/log.h>
++#include "CharacterLog.h"
+ #include <cmath>
+ namespace Eagle::Character {
+ RenderWareApi& RenderWareApi::Get() {static RenderWareApi api;return api;}
+@@ -9,7 +9,7 @@
+     void* lib=dlopen("libGTASA.so",RTLD_NOW|RTLD_NOLOAD);
+     if(!lib) return false;
+     RenderWareApi next;
+-#define RW_SYMBOL(field,name) next.field=reinterpret_cast<decltype(next.field)>(dlsym(lib,name)); if(!next.field) {__android_log_print(ANDROID_LOG_ERROR,"EagleCharacter","missing RW export: %s",name);dlclose(lib);return false;}
++#define RW_SYMBOL(field,name) next.field=reinterpret_cast<decltype(next.field)>(dlsym(lib,name)); if(!next.field) {LogLine(ANDROID_LOG_ERROR,"missing RW export: %s",name);dlclose(lib);return false;}
+     RW_SYMBOL(readClump,"_Z17RpClumpStreamReadP8RwStream")
+     RW_SYMBOL(cloneClump,"_Z12RpClumpCloneP7RpClump")
+     RW_SYMBOL(findChunk,"_Z17RwStreamFindChunkP8RwStreamjPjS1_")
+diff -ruN a/jni/game/character/CharacterTexture.cpp b/jni/game/character/CharacterTexture.cpp
+--- a/jni/game/character/CharacterTexture.cpp	1970-01-01 00:00:00.000000000 +0000
++++ b/jni/game/character/CharacterTexture.cpp	2026-10-08 00:08:53.625333464 +0000
+@@ -0,0 +1,55 @@
++#include "CharacterTexture.h"
++#include "../../vendor/imgui/stb_image.h" // implementation compiled in main.cpp
++#include <cstring>
++#include <fstream>
++namespace Eagle::Character {
++namespace {
++constexpr int kMaxRaster=4096;
++}
++bool ReadPng(const std::string& path,int maxSize,std::vector<uint8_t>& rgba,int& width,int& height,std::string& error) {
++    rgba.clear();width=height=0;
++    std::ifstream file(path,std::ios::binary|std::ios::ate);
++    if(!file) {error="file not found: "+path;return false;}
++    const auto size=file.tellg();
++    if(size<33||size>16*1024*1024) {error="PNG file size: "+path;return false;}
++    std::vector<uint8_t> bytes(static_cast<size_t>(size));file.seekg(0);
++    if(!file.read(reinterpret_cast<char*>(bytes.data()),bytes.size())) {error="read failed: "+path;return false;}
++    if(std::memcmp(bytes.data(),"\x89PNG\r\n\x1a\n",8)) {error="not a PNG: "+path;return false;}
++    // Dimensions from the header first: an oversized image is refused before it is decoded.
++    int w=0,h=0,channels=0;
++    if(!stbi_info_from_memory(bytes.data(),int(bytes.size()),&w,&h,&channels)||w<1||h<1||w>maxSize||h>maxSize) {
++        error="PNG dimensions (max "+std::to_string(maxSize)+"): "+path;return false;
++    }
++    uint8_t* pixels=stbi_load_from_memory(bytes.data(),int(bytes.size()),&w,&h,&channels,4);
++    if(!pixels) {const char* why=stbi_failure_reason();error=std::string("PNG decode failed (")+(why ? why:"?")+"): "+path;return false;}
++    if(w<1||h<1||w>maxSize||h>maxSize) {stbi_image_free(pixels);error="PNG dimensions: "+path;return false;}
++    rgba.assign(pixels,pixels+size_t(w)*size_t(h)*4);stbi_image_free(pixels);
++    width=w;height=h;return true;
++}
++RwTexture* CreateRgbaTexture(const uint8_t* rgba,int width,int height) {
++    if(!rgba||width<1||height<1||width>kMaxRaster||height>kMaxRaster) return nullptr;
++    if(!RwRasterCreate||!RwRasterLock||!RwRasterUnlock||!RwRasterDestroy) return nullptr;
++    RwRaster* raster=RwRasterCreate(width,height,32,int(rwRASTERTYPETEXTURE)|int(rwRASTERFORMAT8888));
++    if(!raster) return nullptr;
++    bool copied=false;
++    if(RwUInt8* pixels=RwRasterLock(raster,0,rwRASTERLOCKWRITE)) {
++        // The locked allocation decides what may be written: never RGBA into a 16-bit raster or past a row.
++        const int w=raster->width,h=raster->height;
++        if(raster->depth==32&&w>=1&&h>=1&&w<=kMaxRaster&&h<=kMaxRaster&&raster->stride>=w*4) {
++            for(int y=0;y<h;++y) {
++                uint8_t* row=pixels+size_t(y)*size_t(raster->stride);
++                if(w==width&&h==height) {std::memcpy(row,rgba+size_t(y)*size_t(width)*4,size_t(width)*4);continue;}
++                // A driver that rounds the size up: stretch the image over the whole raster, so UV 0..1
++                // still cover all of it. Padding would move every UV of the model (384x512, 512x509, 104x104).
++                const uint8_t* source=rgba+size_t(y*height/h)*size_t(width)*4;
++                for(int x=0;x<w;++x) std::memcpy(row+size_t(x)*4,source+size_t(x*width/w)*4,4);
++            }
++            copied=true;
++        }
++        RwRasterUnlock(raster);
++    }
++    RwTexture* texture=copied ? RwTextureCreate(raster):nullptr;
++    if(!texture) RwRasterDestroy(raster);
++    return texture;
++}
++}
+diff -ruN a/jni/game/character/CharacterTexture.h b/jni/game/character/CharacterTexture.h
+--- a/jni/game/character/CharacterTexture.h	1970-01-01 00:00:00.000000000 +0000
++++ b/jni/game/character/CharacterTexture.h	2026-10-08 00:08:53.632712474 +0000
+@@ -0,0 +1,14 @@
++#pragma once
++#include "CharacterRenderWare.h"
++#include <string>
++#include <vector>
++namespace Eagle::Character {
++// PNGs of the character root are read here by their full path, never with RtPNGImageRead: its RwStream
++// goes through the game's NvFOpen, which puts the storage root in front of every name it is given
++// ("/storage/emulated/0/TESTLIT//storage/emulated/0/TESTLIT/character/...": file not found).
++// Tightly packed RGBA rows, top row first. False (with `error`) for a missing/corrupt file or a size
++// outside 1..maxSize.
++bool ReadPng(const std::string& path,int maxSize,std::vector<uint8_t>& rgba,int& width,int& height,std::string& error);
++// 32-bit texture from tightly packed RGBA rows; nullptr on failure and no raster is left behind.
++RwTexture* CreateRgbaTexture(const uint8_t* rgba,int width,int height);
++}
+diff -ruN a/jni/game/character/FaceManager.cpp b/jni/game/character/FaceManager.cpp
+--- a/jni/game/character/FaceManager.cpp	2026-10-08 00:08:53.639490386 +0000
++++ b/jni/game/character/FaceManager.cpp	2026-10-08 00:08:53.641409852 +0000
+@@ -1,5 +1,6 @@
+ #include "FaceManager.h"
+-#include "util/TextureUploadManager.h"
++#include "CharacterTexture.h"
++#include "CharacterLog.h"
+ #include <algorithm>
+ #include <cstdio>
+ #include <cstring>
+@@ -16,13 +17,11 @@
+     const std::string donor="user_eg_"+(face ? std::string("face_"):std::string("skin_"))+(a.gender ? "f":"m")+(face ? "_1":"");
+     const bool donorAtlas=std::ifstream(root_+"/character/textures/"+donor+".png").good();
+     if(donorAtlas) name=donor;
+-    auto* image=RtPNGImageRead((root_+"/character/textures/"+name+".png").c_str());
+-    if(!image) return {};
+-    const int w=image->width,h=image->height;
+-    if(image->depth!=32||w<1||h<1||w>512||h>512||image->stride<w*4||!image->cpPixels) {RwImageDestroy(image);return {};}
+-    std::vector<uint8_t> pixels(size_t(w)*h*4);
+-    for(int y=0;y<h;++y) std::memcpy(pixels.data()+size_t(y)*w*4,image->cpPixels+y*image->stride,size_t(w)*4);
+-    RwImageDestroy(image);
++    // Read by full path (see CharacterTexture.h): RtPNGImageRead opened "<storage>/<root>/..." here.
++    std::vector<uint8_t> pixels;int w=0,h=0;std::string error;
++    if(!ReadPng(root_+"/character/textures/"+name+".png",512,pixels,w,h,error)) {
++        LogLine(ANDROID_LOG_ERROR,"overlay %s: %s",name.c_str(),error.c_str());return {};
++    }
+     // Sample texture UV contract: front is centred on u .25, v .25..80.
+     // Multiplicative details keep skin tone identical across the neck seam.
+     for(int y=0;y<h;++y) for(int x=0;x<w;++x) {
+@@ -37,7 +36,8 @@
+         } else if(a.tattoo&&v>.3f&&v<.55f&&u>.33f&&u<.56f&&((x+y*a.tattoo)%14)<4) shade=.3f;
+         for(int c=0;c<3;++c) pixels[(size_t(y)*w+x)*4+c]=uint8_t(pixels[(size_t(y)*w+x)*4+c]*shade);
+     }
+-    TexturePtr texture(TextureUploadManager::CreateRwTextureFromBytes(pixels.data(),w,h,true),TextureDeleter{});
++    // Same size as the atlas: a power-of-two padded raster would shift the UVs of a 104x104 skin.
++    TexturePtr texture(CreateRgbaTexture(pixels.data(),w,h),TextureDeleter{});
+     if(!texture) return {};
+     std::snprintf(texture->name,sizeof(texture->name),"eg_overlay");
+     texture->filterAddressing=rwFILTERLINEAR|(rwTEXTUREADDRESSCLAMP<<8)|(rwTEXTUREADDRESSCLAMP<<12);
+diff -ruN a/jni/game/clothes/ClothesLoader.cpp b/jni/game/clothes/ClothesLoader.cpp
+--- a/jni/game/clothes/ClothesLoader.cpp	2026-10-08 00:08:53.648751854 +0000
++++ b/jni/game/clothes/ClothesLoader.cpp	2026-10-08 00:08:53.650416819 +0000
+@@ -1,7 +1,8 @@
+ #include "ClothesLoader.h"
++#include "../character/CharacterTexture.h"
++#include "../character/CharacterLog.h"
+ #include <cstring>
+ #include <cstdio>
+-#include <fstream>
+ #include <cmath>
+ #include <algorithm>
+ namespace Eagle::Character {
+@@ -107,22 +108,14 @@
+ TexturePtr ClothesLoader::Texture(const std::string& name) {
+     auto old=textures_.find(name);if(old!=textures_.end()) if(auto t=old->second.lock()) return t;
+     const TextureDefinition* definition=nullptr;for(const auto& d:catalog_.Textures()) if(d.name==name) {definition=&d;break;}
+-    if(!definition||!RtPNGImageRead||!RwImageFindRasterFormat||!RwRasterSetFromImage) return {};
+-    const auto path=root_+"/"+definition->file;
+-    std::ifstream file(path,std::ios::binary);uint8_t header[24]{};
+-    if(!file.read(reinterpret_cast<char*>(header),24)||std::memcmp(header,"\x89PNG\r\n\x1a\n",8)) return {};
+-    auto big=[](const uint8_t* p) {return uint32_t(p[3])|(uint32_t(p[2])<<8)|(uint32_t(p[1])<<16)|(uint32_t(p[0])<<24);};
+-    const auto w=big(header+16),h=big(header+20);if(!w||!h||w>512||h>512) return {};
+-    RwImage* image=RtPNGImageRead(path.c_str());if(!image) return {};
+-    RwInt32 width=0,height=0,depth=0,flags=0;
+-    RwRaster* raster=nullptr;
+-    if(RwImageFindRasterFormat(image,rwRASTERTYPETEXTURE,&width,&height,&depth,&flags)) {
+-        raster=RwRasterCreate(width,height,depth,flags);
+-        if(raster&&!RwRasterSetFromImage(raster,image)) {RwRasterDestroy(raster);raster=nullptr;}
+-    }
+-    RwImageDestroy(image);if(!raster) return {};
+-    TexturePtr texture(RwTextureCreate(raster),TextureDeleter{});
+-    if(!texture) {RwRasterDestroy(raster);return {};}
++    if(!definition) return {};
++    // Read by full path (see CharacterTexture.h): RtPNGImageRead opened "<storage>/<root>/..." here.
++    std::vector<uint8_t> rgba;int width=0,height=0;std::string error;
++    if(!ReadPng(root_+"/"+definition->file,512,rgba,width,height,error)) {
++        LogLine(ANDROID_LOG_ERROR,"texture %s: %s",name.c_str(),error.c_str());return {};
++    }
++    TexturePtr texture(CreateRgbaTexture(rgba.data(),width,height),TextureDeleter{});
++    if(!texture) {LogLine(ANDROID_LOG_ERROR,"texture %s: no 32-bit raster for %dx%d",name.c_str(),width,height);return {};}
+     std::snprintf(texture->name,sizeof(texture->name),"%s",name.c_str());
+     texture->filterAddressing=rwFILTERLINEAR|(rwTEXTUREADDRESSCLAMP<<8)|(rwTEXTUREADDRESSCLAMP<<12);
+     auto& rw=RenderWareApi::Get();if(!dictionary_) dictionary_=rw.createDictionary();if(!dictionary_) return {};
+diff -ruN a/jni/game/clothes/ClothesStreaming.cpp b/jni/game/clothes/ClothesStreaming.cpp
+--- a/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 00:08:53.657411152 +0000
++++ b/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 00:08:53.659230179 +0000
+@@ -1,6 +1,6 @@
+ #include "ClothesStreaming.h"
+ #include <fstream>
+-#include <android/log.h>
++#include "../character/CharacterLog.h"
+ namespace Eagle::Character {
+ ClothesStreaming::ClothesStreaming(std::string root,const CharacterCatalog& catalog):root_(std::move(root)),catalog_(catalog),loader_(root_,catalog_),worker_(&ClothesStreaming::Worker,this) {}
+ ClothesStreaming::~ClothesStreaming() {
+@@ -52,7 +52,7 @@
+             if(ticket.error.empty()&&resident_+required>64*1024*1024) ticket.error="64 MiB asset cache budget";
+             if(ticket.error.empty()) ticket.asset=loader_.Load(*catalog_.Asset(reply.key),reply.bytes,ticket.error);
+             if(ticket.asset) {ticket.state=AssetTicket::State::Ready;resident_+=ticket.asset->memory;}
+-            else {ticket.state=AssetTicket::State::Failed;__android_log_print(ANDROID_LOG_ERROR,"EagleCharacter","asset %s: %s",reply.key.c_str(),ticket.error.c_str());}
++            else {ticket.state=AssetTicket::State::Failed;LogLine(ANDROID_LOG_ERROR,"asset %s: %s",reply.key.c_str(),ticket.error.c_str());}
+         }
+     }
+     for(auto it=cache_.begin();it!=cache_.end();) {
+diff -ruN a/jni/game/hooks.cpp b/jni/game/hooks.cpp
+--- a/jni/game/hooks.cpp	2026-10-08 00:08:53.666804052 +0000
++++ b/jni/game/hooks.cpp	2026-10-08 00:08:53.669294489 +0000
+@@ -71,7 +71,12 @@
+ void BuildGameFilePath(const char* r1, char* out, size_t cap)
+ {
+ 	const char* remap = RemapGameFile(r1);
+-	snprintf(out, cap, "%s%s", g_pszStorage ? g_pszStorage : "", remap ? remap : r1);
++	const char* path = remap ? remap : r1;
++	const char* root = g_pszStorage ? g_pszStorage : "";
++	// A full path that already starts at the storage root is complete. Prefixing it again gave
++	// "/storage/emulated/0/TESTLIT//storage/emulated/0/TESTLIT/..." (file not found).
++	if(*root && !strncmp(path, root, strlen(root))) root = "";
++	snprintf(out, cap, "%s%s", root, path);
+ }
+ 
+ stFile* NvFOpen(const char* r0, const char* r1, int r2, int r3)
