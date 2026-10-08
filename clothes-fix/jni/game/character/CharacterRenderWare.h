@@ -22,6 +22,12 @@ struct RenderWareApi {
     RwTexDictionary* (*setDictionary)(RwTexDictionary*)=nullptr;
     RwTexture* (*addTexture)(RwTexDictionary*,RwTexture*)=nullptr; // returns the texture (0x274120)
     RpMaterial* (*setTexture)(RpMaterial*,RwTexture*)=nullptr;
+    // Optional, what CVisibilityPlugins::RenderPedCB (0x6fb3cc) does with a ped: no drawing past
+    // ms_pedLodDist (squared) from *ms_pCameraPosn, and fading with the clump alpha.
+    RpAtomic* (*renderPedCB)(RpAtomic*)=nullptr;
+    RwV3d** cameraPosn=nullptr;float* pedLodDist=nullptr;
+    int (*clumpAlpha)(RpClump*)=nullptr;
+    void (*enableAlphaModulate)(float)=nullptr;void (*disableAlphaModulate)()=nullptr;
     bool Resolve();
     static RenderWareApi& Get();
 };

@@ -22,6 +22,7 @@ private:
     CPed* ped_=nullptr;RpClump* hookedClump_=nullptr;
     std::vector<Original> originals_;
     PlayerAppearance requested_,active_;bool requestedValid_=false,loading_=false,drawOK_=false,drawLogged_=false;
+    bool pedCulling_=false; // the ped rendered through RenderPedCB: parts follow its distance cull and fade
     std::vector<std::shared_ptr<AssetTicket>> pending_;
     std::vector<std::unique_ptr<ClothesRenderer>> parts_;
     TexturePtr face_,body_;uint16_t hidden_=0;

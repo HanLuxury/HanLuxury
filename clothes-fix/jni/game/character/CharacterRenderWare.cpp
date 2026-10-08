@@ -25,6 +25,14 @@ bool RenderWareApi::Resolve() {
     RW_SYMBOL(addTexture,"_Z25RwTexDictionaryAddTextureP15RwTexDictionaryP9RwTexture")
     RW_SYMBOL(setTexture,"_Z20RpMaterialSetTextureP10RpMaterialP9RwTexture")
 #undef RW_SYMBOL
+#define RW_OPTIONAL(field,name) next.field=reinterpret_cast<decltype(next.field)>(dlsym(lib,name));
+    RW_OPTIONAL(renderPedCB,"_ZN18CVisibilityPlugins11RenderPedCBEP8RpAtomic")
+    RW_OPTIONAL(cameraPosn,"_ZN18CVisibilityPlugins14ms_pCameraPosnE")
+    RW_OPTIONAL(pedLodDist,"_ZN18CVisibilityPlugins13ms_pedLodDistE")
+    RW_OPTIONAL(clumpAlpha,"_ZN18CVisibilityPlugins13GetClumpAlphaEP7RpClump")
+    RW_OPTIONAL(enableAlphaModulate,"_Z23emu_EnableAlphaModulatef")
+    RW_OPTIONAL(disableAlphaModulate,"_Z24emu_DisableAlphaModulatev")
+#undef RW_OPTIONAL
     *this=next;dlclose(lib);return true;
 }
 bool CollectAtomics(RpClump* clump,std::vector<RpAtomic*>& result) {

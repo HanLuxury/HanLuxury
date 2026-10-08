@@ -1,7 +1,7 @@
 diff -ruN a/README_INSTALL.md b/README_INSTALL.md
---- a/README_INSTALL.md	2026-10-08 04:53:29.974682691 +0000
-+++ b/README_INSTALL.md	2026-10-08 04:53:29.976612080 +0000
-@@ -40,6 +40,40 @@
+--- a/README_INSTALL.md	2026-10-08 10:38:55.220780966 +0000
++++ b/README_INSTALL.md	2026-10-08 10:38:55.215615487 +0000
+@@ -40,6 +40,55 @@
  - Penulisan saldo, skin, dan gender yang relevan memakai epoch guard agar snapshot async lama tidak menimpa transaksi clothes.
  - Sistem ShadowHook yang sudah ada tetap menggunakan scope sesuai mode. Offset GTA dan binary libGTASA tidak diubah.
  
@@ -17,7 +17,7 @@ diff -ruN a/README_INSTALL.md b/README_INSTALL.md
 +
 +Yang diubah:
 +
-+- `jni/game/character/CharacterTexture.h/.cpp` (baru): PNG dibaca langsung dari path lengkap dengan stb_image (sudah dikompilasi di `main.cpp`), lalu dibuat raster 32-bit seukuran gambar. Tidak lagi lewat `NvFOpen`/`RtPNGImageRead`/`RwImageFindRasterFormat`. Jika driver membulatkan ukuran raster, gambar diregangkan ke seluruh raster agar UV tetap pas (tekstur 384x512, 512x509, 104x104).
++- `jni/game/character/CharacterTexture.h/.cpp` (baru): PNG dibaca langsung dari path lengkap dengan stb_image (sudah dikompilasi di `main.cpp`), lalu dibuat raster 32-bit. Tidak lagi lewat `NvFOpen`/`RtPNGImageRead`/`RwImageFindRasterFormat`. Ukuran raster selalu power-of-two dan gambar di-resample bilinear ke seluruh raster, jadi UV tetap pas (tekstur 384x512, 512x509, 104x104). Alasannya ada di bagian libGTASA di bawah.
 +- `jni/game/clothes/ClothesLoader.cpp` dan `jni/game/character/FaceManager.cpp`: memakai loader baru. Kegagalan dicatat beserta path dan alasannya. Overlay wajah/kulit tidak lagi di-pad ke power-of-two, karena padding menggeser UV skin 104x104.
 +- `jni/game/hooks.cpp`: `BuildGameFilePath` tidak menambahkan root storage pada path yang sudah diawali root itu.
 +
@@ -27,6 +27,20 @@ diff -ruN a/README_INSTALL.md b/README_INSTALL.md
 +- **Server tidak lagi menendang pemain untuk penolakan biasa.** `eagle_commit_appearance` yang menjawab `insufficient_money`, `already_owned`, `not_owned_or_incompatible`, `price_changed`, `unavailable_item`, `purchase_not_equipped` atau `invalid_appearance` sudah melakukan ROLLBACK dan tidak mengubah apa pun. Pemain mendapat pesan dan bisa mencoba lagi. Hasil yang tidak pasti (tidak ada jawaban, `stale_revision`, `database_error`) tetap kick seperti sebelumnya.
 +- **Simpan/beli selalu dijawab.** Dulu save/buy saat belum berjalan kaki, dalam jeda 500 ms, atau mengubah tattoo/freckles di luar creator dibuang tanpa balasan, sehingga menu macet di "Menyimpan…". Sekarang server mengirim pesan.
 +
++## Penyesuaian ke libGTASA.so arm64 yang Anda kirim
++
++`libGTASA.so` itu tidak di-strip dan membawa DWARF lengkap. Semua yang dipakai clothes/character system dicek terhadap binary itu: alamat fungsi dan GOT (termasuk relokasi `CWorld::Players` di 0x84E7A8), offset struct (`CPed`, `CPlayerPedData`, `RpAtomic`, `RpClump`, `RwRaster`, `RwTexture`), urutan vtable `CPlayerPed`, dan nilai enum. **Semuanya sudah cocok, tidak ada offset yang perlu diganti.** Yang diubah adalah bug yang terlihat setelah membaca kode game di binary itu:
++
++- **Nama frame DFF lebih dari 23 byte.** Plugin node-name RenderWare menyimpan nama di slot 24 byte, tetapi `NodeNameStreamRead` (0x574128) menyalin tanpa batas, sehingga memori di belakangnya tertimpa. `RpClumpClone` juga memotong nama ke 23 karakter (0x5740f0), jadi tag `EAGLE_r<region>_<material>` hilang di clone. Ada 57 DFF di TESTLIT yang terkena. Loader sekarang mengganti nama panjang dengan `#<index frame>` dan sebuah chunk pengisi berukuran sama yang dilewati RW (0x280f84) sebelum stream dibaca. Region dan material disimpan per geometry, bukan dibaca ulang dari nama frame clone.
++- **Validasi DFF lebih ketat** sebelum data masuk ke RW: `maxWeights` skin, split data, versi/flag/ukuran keyframe HAnim, bind matrix dan frame yang sama di semua part, dan tipe string nama tekstur.
++- **Tekstur hitam di GPU tanpa NPOT.** `RwRasterUnlock` memberi setiap tekstur baru `GL_REPEAT` (0x23f870), dan GLES2 tanpa dukungan NPOT menggambar tekstur NPOT yang di-repeat sebagai hitam. `CreateRgbaTexture` sekarang selalu membuat raster power-of-two.
++- **Clothes mengikuti cull jarak dan fade ped.** Hook render menggantikan `CVisibilityPlugins::RenderPedCB` (0x6fb3cc), jadi sekarang ikut melakukan yang dilakukan fungsi itu: tidak menggambar di luar `ms_pedLodDist` (jarak kuadrat dari frame clump ke kamera) dan memakai alpha clump lewat `emu_EnableAlphaModulate(alpha/255)`. Callback asli tidak pernah dicatat sebagai hook itu sendiri, sehingga fallback tidak bisa rekursi tanpa akhir.
++- **Kamera creator di sisi yang salah.** Arah depan game adalah `(-sin h, cos h)` (0x537958). Rumus kamera memakai `+sin`, jadi kamera dicerminkan. Sekarang memakai `-sin`.
++- **Tulisan liar 16 KB di `~CPedSamp`.** `*(uint32_t*)(m_pPlayerData + 76) = 0` adalah aritmetika pointer `CPlayerPedData*`: melompat 76 struct (16416 byte) ke entri `CWorld::Players` lain. Baris itu dihapus. `~CPlayerPed` sendiri membebaskan group ped tersebut (`AddGroup` 0x5c0c4c, `RemoveGroup` 0x5c0f98), dan `RemoveGroup(-1)` aman di binary ini.
++- **Ganti skin membocorkan clump.** `CEntity::CreateRwObject` menaruh clump baru di atas yang lama tanpa menghapusnya (0x4cb2d8), jadi setiap `SetPlayerSkin` membocorkan satu clump dan model lama tidak pernah dibebaskan. `CPedSamp::SetModelIndex` sekarang mengikuti urutan game (0x40a0d4): hook clothes dilepas, `DeleteRwObject`, lalu model baru. Warna skin/rambut dan outfit yang tersimpan tetap ada dan dipasang lagi di clump baru (`CClothesSystem::BeforeClumpReplaced`/`AfterClumpReplaced`).
++
++Yang belum: shadow realtime bawaan masih menggambar ped carrier tanpa clothes (`ShCamStdClumpRenderCB` 0x6db6b0 tidak lewat hook, perlu hook `CShadowCamera::Update`). Audit seluruh offset client lain di luar clothes system (406 alamat) belum selesai.
++
 +## Pemeriksaan (host, bukan perangkat)
 +
 +- 30 PNG TESTLIT terbaca dan byte RGBA-nya identik dengan Pillow. Pembuatan raster ukuran persis, dibulatkan, dan stride lebar bersih di AddressSanitizer/UBSan tanpa raster bocor.
@@ -34,7 +48,8 @@ diff -ruN a/README_INSTALL.md b/README_INSTALL.md
 +- `CharacterCatalog` client memuat TESTLIT, menerima 960 kombinasi item × bentuk tubuh, dan membaca paket appearance persis seperti yang ditulis `EC_SendAppearance`.
 +- `BuildRetarget` asli berhasil untuk 324 DFF ke skeleton `cwmofr` dan `cat` (PED_IMPORT).
 +- `cefui/index.html` asli dijalankan di Chromium: creator → simpan, toko → beli, lemari → hanya item dimiliki. Payload lolos port `EC_Parse`/`EC_Validate` dan berada di bawah batas 1024 byte JNI.
-+- Fungsi Pawn yang diubah dikompilasi pawncc 3.10.10 dengan stub, tanpa error/warning. File C++ yang diubah lolos cek sintaks clang 18.
++- Fungsi Pawn yang diubah dikompilasi pawncc 3.10.10 dengan stub, tanpa error/warning. File C++ yang diubah, dan semua file yang meng-include header yang diubah, lolos cek sintaks clang 18 untuk target aarch64.
++- 324 DFF lolos validator baru. Nama frame panjang di 57 DFF ditulis ulang, dan hasilnya tetap lolos retarget ke carrier 158/298.
 +- Belum: build NDK, compile gamemode lengkap, dan uji di HP.
 +
 +Setelah build baru, baris `TESTLIT//storage/...` tidak boleh muncul lagi. Jika pakaian tidak tampil atau masih FC, kirim baris `EagleCharacter` dari log client dan `adb logcat -b crash -d`.
@@ -43,8 +58,8 @@ diff -ruN a/README_INSTALL.md b/README_INSTALL.md
  
  Statusnya **belum teridentifikasi secara pasti**. `libc.so (abort)` berarti proses dihentikan lewat abort, tetapi log singkat itu tidak memuat pesan penyebabnya. `libmultiplayer.so+0x236a74` perlu disimbolkan dengan **libmultiplayer.so persis dari APK yang mengalami crash**. LibGTASA saja tidak dapat memetakan alamat milik library client. Jangan memakai alamat build lama untuk binary hasil build baru ini.
 diff -ruN a/gamemodes/SERVER/player/character/character_system.inc b/gamemodes/SERVER/player/character/character_system.inc
---- a/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 04:53:29.843687157 +0000
-+++ b/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 04:53:29.846451086 +0000
+--- a/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 10:38:55.232112627 +0000
++++ b/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 10:38:55.226139360 +0000
 @@ -252,6 +252,26 @@
      }
      return false;
@@ -120,9 +135,85 @@ diff -ruN a/gamemodes/SERVER/player/character/character_system.inc b/gamemodes/S
      }
      if(!strcmp(action,"buy"))
      {
+diff -ruN a/jni/ClothesSystem.cpp b/jni/ClothesSystem.cpp
+--- a/jni/ClothesSystem.cpp	2026-10-08 10:38:55.242205641 +0000
++++ b/jni/ClothesSystem.cpp	2026-10-08 10:38:55.237216760 +0000
+@@ -1578,6 +1578,16 @@
+     }
+ }
+ 
++void CClothesSystem::BeforeClumpReplaced(CPed* ped) {
++    UninstallColorRenderer(ped);
++}
++
++void CClothesSystem::AfterClumpReplaced(CPed* ped) {
++    if (!ped || !ped->m_pRwClump) return;
++    if (SkinColorForPed(ped) != 0 || GetHairColorForPed(ped) != 0)
++        InstallColorRenderer(ped);
++}
++
+ bool CClothesSystem::SetClothesComponent(CPed* ped, uint8_t type,
+                                          uint32_t drawable,
+                                          uint32_t texture) {
+diff -ruN a/jni/ClothesSystem.h b/jni/ClothesSystem.h
+--- a/jni/ClothesSystem.h	2026-10-08 10:38:55.251948882 +0000
++++ b/jni/ClothesSystem.h	2026-10-08 10:38:55.247064553 +0000
+@@ -110,6 +110,10 @@
+     static bool ApplyClothesData(CPed* ped, const ClothesItem* items, int count);
+     static bool ApplyStoredClothes(CPed* ped);
+     static void ClearPed(CPed* ped);
++    // Around a skin change that destroys the clump: callbacks come off the old clump first, and the
++    // stored skin/hair colours go back on the new one. Outfit and colour state are kept.
++    static void BeforeClumpReplaced(CPed* ped);
++    static void AfterClumpReplaced(CPed* ped);
+ 
+     static bool BuildPlayerClothes(CPed* ped, bool force = true);
+     static bool ResetToDefaultCJ(CPed* ped);
+diff -ruN a/jni/game/PedSamp.cpp b/jni/game/PedSamp.cpp
+--- a/jni/game/PedSamp.cpp	2026-10-08 10:38:55.262442912 +0000
++++ b/jni/game/PedSamp.cpp	2026-10-08 10:38:55.256675964 +0000
+@@ -1,4 +1,5 @@
+ #include "game/character/CharacterManager.h"
++#include "../ClothesSystem.h"
+ #include "../main.h"
+ #include "game.h"
+ #include "../net/netgame.h"
+@@ -102,8 +103,11 @@
+ 
+ 		//	ClearAllTasks();
+ 		}
+-		if (m_pPed->m_pPlayerData)
+-            *(uint32_t*)(m_pPed->m_pPlayerData + 76) = 0;
++		// m_nPlayerGroup is left alone: ~CPlayerPed frees the group this ped's constructor took
++		// (CPedGroups::AddGroup 0x5c0c4c, RemoveGroup 0x5c0f98). When all 8 were taken it holds -1, and
++		// RemoveGroup(-1) only reads ms_activeGroups[-1], the zero top byte of the allocator vtable pointer
++		// before it, and returns. Group 0 must not be forced: it is normally the local player's group. The old
++		// "m_pPlayerData + 76" stepped 76 CPlayerPedData (16416 bytes) into another CWorld::Players entry.
+ 		// CPedSamp::Destructor
+ 
+ 		//(( void (*)(CPed*))(*(void**)(m_pPed->vtable+0x4)))(m_pPed);
+@@ -555,11 +559,17 @@
+         if (!CStreaming::TryLoadModel(uiModel))
+             return;
+ 
+-        // CEntity::DeleteRwObject();
++        // Callbacks go back on the live clump first, then the clump goes, as in SA-MP and the game's
++        // own player model change (0x40a0d4). CEntity::CreateRwObject stores the new clump over the old
++        // one without destroying it (0x4cb2d8), so without this every skin change leaked a clump and
++        // kept the old model referenced, and RemoveModelIfNoRefs below never freed it.
+         Eagle::Character::CharacterManager::BeforePedDestroyed(m_pPed);
++        CClothesSystem::BeforeClumpReplaced(m_pPed);
++        m_pPed->DeleteRwObject();
+         m_pPed->m_nModelIndex = uiModel;
+ 
+         m_pPed->SetModelIndex(uiModel);
++        CClothesSystem::AfterClumpReplaced(m_pPed);
+ 
+         CStreaming::RemoveModelIfNoRefs(oldModelId);
+ 	}
 diff -ruN a/jni/game/character/CharacterLog.h b/jni/game/character/CharacterLog.h
 --- a/jni/game/character/CharacterLog.h	1970-01-01 00:00:00.000000000 +0000
-+++ b/jni/game/character/CharacterLog.h	2026-10-08 04:53:29.854364029 +0000
++++ b/jni/game/character/CharacterLog.h	2026-10-08 10:38:55.267449925 +0000
 @@ -0,0 +1,13 @@
 +#pragma once
 +#include <android/log.h>
@@ -138,8 +229,8 @@ diff -ruN a/jni/game/character/CharacterLog.h b/jni/game/character/CharacterLog.
 +}
 +}
 diff -ruN a/jni/game/character/CharacterManager.cpp b/jni/game/character/CharacterManager.cpp
---- a/jni/game/character/CharacterManager.cpp	2026-10-08 04:53:29.860716713 +0000
-+++ b/jni/game/character/CharacterManager.cpp	2026-10-08 04:53:29.862569500 +0000
+--- a/jni/game/character/CharacterManager.cpp	2026-10-08 10:38:55.277502551 +0000
++++ b/jni/game/character/CharacterManager.cpp	2026-10-08 10:38:55.272616095 +0000
 @@ -9,7 +9,7 @@
  #include "java_systems/cef/CEF.h"
  #include "json.hpp"
@@ -185,9 +276,19 @@ diff -ruN a/jni/game/character/CharacterManager.cpp b/jni/game/character/Charact
          it->second->Request(s.preview&&pair.first==local ? s.draft:pair.second.appearance);it->second->Tick(ped);
      }
      if(s.preview) {
+@@ -134,7 +137,8 @@
+         auto* ped=Ped(local);
+         if(!ped||ped->IsInVehicle()) StopPreview();
+         else {const auto& p=ped->GetPosition();const float a=s.angle+ped->GetHeading();
+-            CCamera::SetPosition(p.x+std::sin(a)*s.distance,p.y+std::cos(a)*s.distance,p.z+s.height+.1f,0,0,0);
++            // A ped with heading h faces (-sin h, cos h) (CPlaceable::GetHeading, CMatrix::SetRotateZOnly 0x537958).
++            CCamera::SetPosition(p.x-std::sin(a)*s.distance,p.y+std::cos(a)*s.distance,p.z+s.height+.1f,0,0,0);
+             CCamera::LookAtPoint(p.x,p.y,p.z+s.height,2);
+         }
+     }
 diff -ruN a/jni/game/character/CharacterPlayer.cpp b/jni/game/character/CharacterPlayer.cpp
---- a/jni/game/character/CharacterPlayer.cpp	2026-10-08 04:53:29.869901980 +0000
-+++ b/jni/game/character/CharacterPlayer.cpp	2026-10-08 04:53:29.871689091 +0000
+--- a/jni/game/character/CharacterPlayer.cpp	2026-10-08 10:38:55.286915083 +0000
++++ b/jni/game/character/CharacterPlayer.cpp	2026-10-08 10:38:55.281969582 +0000
 @@ -5,14 +5,14 @@
  #include "game/Entity/Ped/Ped.h"
  #include "ClothesSystem.h"
@@ -250,19 +351,45 @@ diff -ruN a/jni/game/character/CharacterPlayer.cpp b/jni/game/character/Characte
          parts_=std::move(next);active_=requested_;pending_.clear();loading_=false;
          hidden_=ClothesManager::HiddenRegions(catalog_,active_);
          face_=faces_.Get(active_,true);body_=faces_.Get(active_,false);
-@@ -76,7 +76,8 @@
+@@ -75,23 +75,43 @@
+     for(auto* atomic:atomics) if(owners.count(atomic)) return;
      // Allocate all bookkeeping before touching callbacks.
      originals_.reserve(atomics.size());owners.reserve(owners.size()+atomics.size());
-     for(auto* atomic:atomics) originals_.push_back({atomic,atomic->renderCallBack});
+-    for(auto* atomic:atomics) originals_.push_back({atomic,atomic->renderCallBack});
 -    hookedClump_=ped->m_pRwClump;
++    // Never record the hook as an original: falling back to it would recurse without end.
++    const auto& rw=RenderWareApi::Get();
++    for(auto* atomic:atomics) originals_.push_back({atomic,atomic->renderCallBack==RenderHook ? rw.renderPedCB:atomic->renderCallBack});
++    pedCulling_=rw.renderPedCB&&originals_.front().callback==rw.renderPedCB;
 +    hookedClump_=ped->m_pRwClump;drawLogged_=false;
 +    LogLine(ANDROID_LOG_INFO,"player %u: %zu parts on ped model %d",unsigned(id_),parts_.size(),int(ped->m_nModelIndex));
      for(const auto& old:originals_) {owners[old.atomic]=this;old.atomic->renderCallBack=RenderHook;}
  }
  bool CharacterPlayer::Draw() {
-@@ -91,7 +92,10 @@
+     if(!ped_||ped_->m_pRwClump!=hookedClump_||parts_.empty()) return false;
+     auto* frame=RpClumpGetFrame(hookedClump_);
+     if(!frame) return false;auto* root=RwFrameGetLTM(frame);if(!root) return false;
++    // The hook replaces RenderPedCB (0x6fb3cc), so do what it does: nothing past ms_pedLodDist, and the
++    // clump alpha fades the parts (alpha/255 through emu_EnableAlphaModulate).
++    const auto& rw=RenderWareApi::Get();int alpha=255;
++    if(pedCulling_&&rw.cameraPosn&&*rw.cameraPosn&&rw.pedLodDist) {
++        const RwV3d& camera=**rw.cameraPosn;
++        const float dx=root->pos.x-camera.x,dy=root->pos.y-camera.y,dz=root->pos.z-camera.z;
++        if(dx*dx+dy*dy+dz*dz>=*rw.pedLodDist) return true; // the native ped is not drawn either
++        if(rw.clumpAlpha) alpha=rw.clumpAlpha(hookedClump_);
++    }
+     for(auto& part:parts_) if(!part->Prepare(hookedClump_,*root)) return false;
+     const auto skin=SkinToneManager::Get(catalog_,active_),hair=HairManager::GetColour(catalog_,active_);
++    const bool fade=alpha!=255&&rw.enableAlphaModulate&&rw.disableAlphaModulate;
++    if(fade) rw.enableAlphaModulate(float(alpha)/255.f);
+     for(auto& part:parts_) part->Render(hidden_,skin,hair,face_.get(),body_.get());
++    if(fade) rw.disableAlphaModulate();
+     return true;
+ }
  RpAtomic* CharacterPlayer::RenderHook(RpAtomic* atomic) {
-     auto found=owners.find(atomic);if(found==owners.end()) return AtomicDefaultRenderCallBack(atomic);
+-    auto found=owners.find(atomic);if(found==owners.end()) return AtomicDefaultRenderCallBack(atomic);
++    auto found=owners.find(atomic);
++    if(found==owners.end()) {const auto& rw=RenderWareApi::Get();return rw.renderPedCB ? rw.renderPedCB(atomic):AtomicDefaultRenderCallBack(atomic);}
      auto& owner=*found->second;
 -    if(atomic==owner.originals_.front().atomic) owner.drawOK_=owner.Draw();
 +    if(atomic==owner.originals_.front().atomic) {
@@ -273,8 +400,8 @@ diff -ruN a/jni/game/character/CharacterPlayer.cpp b/jni/game/character/Characte
          return old.callback ? old.callback(atomic):AtomicDefaultRenderCallBack(atomic);
      return atomic;
 diff -ruN a/jni/game/character/CharacterPlayer.h b/jni/game/character/CharacterPlayer.h
---- a/jni/game/character/CharacterPlayer.h	2026-10-08 04:53:29.880154703 +0000
-+++ b/jni/game/character/CharacterPlayer.h	2026-10-08 04:53:29.882302706 +0000
+--- a/jni/game/character/CharacterPlayer.h	2026-10-08 10:38:55.296750345 +0000
++++ b/jni/game/character/CharacterPlayer.h	2026-10-08 10:38:55.292155247 +0000
 @@ -5,7 +5,7 @@
  namespace Eagle::Character {
  class CharacterPlayer {
@@ -284,7 +411,7 @@ diff -ruN a/jni/game/character/CharacterPlayer.h b/jni/game/character/CharacterP
      ~CharacterPlayer();
      void Request(const PlayerAppearance& look);
      void Tick(CPed* ped);
-@@ -17,11 +17,11 @@
+@@ -17,11 +17,12 @@
      struct Original {RpAtomic* atomic;RpAtomicCallBackRender callback;};
      static RpAtomic* RenderHook(RpAtomic* atomic);
      bool Draw();
@@ -296,12 +423,13 @@ diff -ruN a/jni/game/character/CharacterPlayer.h b/jni/game/character/CharacterP
      std::vector<Original> originals_;
 -    PlayerAppearance requested_,active_;bool requestedValid_=false,loading_=false,drawOK_=false;
 +    PlayerAppearance requested_,active_;bool requestedValid_=false,loading_=false,drawOK_=false,drawLogged_=false;
++    bool pedCulling_=false; // the ped rendered through RenderPedCB: parts follow its distance cull and fade
      std::vector<std::shared_ptr<AssetTicket>> pending_;
      std::vector<std::unique_ptr<ClothesRenderer>> parts_;
      TexturePtr face_,body_;uint16_t hidden_=0;
 diff -ruN a/jni/game/character/CharacterRenderWare.cpp b/jni/game/character/CharacterRenderWare.cpp
---- a/jni/game/character/CharacterRenderWare.cpp	2026-10-08 04:53:29.889308281 +0000
-+++ b/jni/game/character/CharacterRenderWare.cpp	2026-10-08 04:53:29.891026328 +0000
+--- a/jni/game/character/CharacterRenderWare.cpp	2026-10-08 10:38:55.306586230 +0000
++++ b/jni/game/character/CharacterRenderWare.cpp	2026-10-08 10:38:55.301819127 +0000
 @@ -1,6 +1,6 @@
  #include "CharacterRenderWare.h"
  #include <dlfcn.h>
@@ -319,21 +447,43 @@ diff -ruN a/jni/game/character/CharacterRenderWare.cpp b/jni/game/character/Char
      RW_SYMBOL(readClump,"_Z17RpClumpStreamReadP8RwStream")
      RW_SYMBOL(cloneClump,"_Z12RpClumpCloneP7RpClump")
      RW_SYMBOL(findChunk,"_Z17RwStreamFindChunkP8RwStreamjPjS1_")
+@@ -25,6 +25,14 @@
+     RW_SYMBOL(addTexture,"_Z25RwTexDictionaryAddTextureP15RwTexDictionaryP9RwTexture")
+     RW_SYMBOL(setTexture,"_Z20RpMaterialSetTextureP10RpMaterialP9RwTexture")
+ #undef RW_SYMBOL
++#define RW_OPTIONAL(field,name) next.field=reinterpret_cast<decltype(next.field)>(dlsym(lib,name));
++    RW_OPTIONAL(renderPedCB,"_ZN18CVisibilityPlugins11RenderPedCBEP8RpAtomic")
++    RW_OPTIONAL(cameraPosn,"_ZN18CVisibilityPlugins14ms_pCameraPosnE")
++    RW_OPTIONAL(pedLodDist,"_ZN18CVisibilityPlugins13ms_pedLodDistE")
++    RW_OPTIONAL(clumpAlpha,"_ZN18CVisibilityPlugins13GetClumpAlphaEP7RpClump")
++    RW_OPTIONAL(enableAlphaModulate,"_Z23emu_EnableAlphaModulatef")
++    RW_OPTIONAL(disableAlphaModulate,"_Z24emu_DisableAlphaModulatev")
++#undef RW_OPTIONAL
+     *this=next;dlclose(lib);return true;
+ }
+ bool CollectAtomics(RpClump* clump,std::vector<RpAtomic*>& result) {
 diff -ruN a/jni/game/character/CharacterRenderWare.h b/jni/game/character/CharacterRenderWare.h
---- a/jni/game/character/CharacterRenderWare.h	2026-10-08 04:53:29.897813968 +0000
-+++ b/jni/game/character/CharacterRenderWare.h	2026-10-08 04:53:29.900006637 +0000
-@@ -20,7 +20,7 @@
+--- a/jni/game/character/CharacterRenderWare.h	2026-10-08 10:38:55.315576753 +0000
++++ b/jni/game/character/CharacterRenderWare.h	2026-10-08 10:38:55.310954350 +0000
+@@ -20,8 +20,14 @@
      RwBool (*destroyDictionary)(RwTexDictionary*)=nullptr;
      RwTexDictionary* (*getDictionary)()=nullptr;
      RwTexDictionary* (*setDictionary)(RwTexDictionary*)=nullptr;
 -    RwTexDictionary* (*addTexture)(RwTexDictionary*,RwTexture*)=nullptr;
 +    RwTexture* (*addTexture)(RwTexDictionary*,RwTexture*)=nullptr; // returns the texture (0x274120)
      RpMaterial* (*setTexture)(RpMaterial*,RwTexture*)=nullptr;
++    // Optional, what CVisibilityPlugins::RenderPedCB (0x6fb3cc) does with a ped: no drawing past
++    // ms_pedLodDist (squared) from *ms_pCameraPosn, and fading with the clump alpha.
++    RpAtomic* (*renderPedCB)(RpAtomic*)=nullptr;
++    RwV3d** cameraPosn=nullptr;float* pedLodDist=nullptr;
++    int (*clumpAlpha)(RpClump*)=nullptr;
++    void (*enableAlphaModulate)(float)=nullptr;void (*disableAlphaModulate)()=nullptr;
      bool Resolve();
      static RenderWareApi& Get();
+ };
 diff -ruN a/jni/game/character/CharacterTexture.cpp b/jni/game/character/CharacterTexture.cpp
 --- a/jni/game/character/CharacterTexture.cpp	1970-01-01 00:00:00.000000000 +0000
-+++ b/jni/game/character/CharacterTexture.cpp	2026-10-08 04:53:29.908942080 +0000
++++ b/jni/game/character/CharacterTexture.cpp	2026-10-08 10:38:55.320076158 +0000
 @@ -0,0 +1,69 @@
 +#include "CharacterTexture.h"
 +#include "../../vendor/imgui/stb_image.h" // implementation compiled in main.cpp
@@ -406,7 +556,7 @@ diff -ruN a/jni/game/character/CharacterTexture.cpp b/jni/game/character/Charact
 +}
 diff -ruN a/jni/game/character/CharacterTexture.h b/jni/game/character/CharacterTexture.h
 --- a/jni/game/character/CharacterTexture.h	1970-01-01 00:00:00.000000000 +0000
-+++ b/jni/game/character/CharacterTexture.h	2026-10-08 04:53:29.915620127 +0000
++++ b/jni/game/character/CharacterTexture.h	2026-10-08 10:38:55.325056190 +0000
 @@ -0,0 +1,14 @@
 +#pragma once
 +#include "CharacterRenderWare.h"
@@ -423,8 +573,8 @@ diff -ruN a/jni/game/character/CharacterTexture.h b/jni/game/character/Character
 +RwTexture* CreateRgbaTexture(const uint8_t* rgba,int width,int height);
 +}
 diff -ruN a/jni/game/character/FaceManager.cpp b/jni/game/character/FaceManager.cpp
---- a/jni/game/character/FaceManager.cpp	2026-10-08 04:53:29.921891352 +0000
-+++ b/jni/game/character/FaceManager.cpp	2026-10-08 04:53:29.923945769 +0000
+--- a/jni/game/character/FaceManager.cpp	2026-10-08 10:38:55.334190158 +0000
++++ b/jni/game/character/FaceManager.cpp	2026-10-08 10:38:55.329589268 +0000
 @@ -1,5 +1,6 @@
  #include "FaceManager.h"
 -#include "util/TextureUploadManager.h"
@@ -463,8 +613,8 @@ diff -ruN a/jni/game/character/FaceManager.cpp b/jni/game/character/FaceManager.
      std::snprintf(texture->name,sizeof(texture->name),"eg_overlay");
      texture->filterAddressing=rwFILTERLINEAR|(rwTEXTUREADDRESSCLAMP<<8)|(rwTEXTUREADDRESSCLAMP<<12);
 diff -ruN a/jni/game/clothes/ClothesLoader.cpp b/jni/game/clothes/ClothesLoader.cpp
---- a/jni/game/clothes/ClothesLoader.cpp	2026-10-08 04:53:29.931053367 +0000
-+++ b/jni/game/clothes/ClothesLoader.cpp	2026-10-08 04:53:29.932758377 +0000
+--- a/jni/game/clothes/ClothesLoader.cpp	2026-10-08 10:38:55.344299559 +0000
++++ b/jni/game/clothes/ClothesLoader.cpp	2026-10-08 10:38:55.339189412 +0000
 @@ -1,7 +1,9 @@
  #include "ClothesLoader.h"
 +#include "../character/CharacterTexture.h"
@@ -646,8 +796,8 @@ diff -ruN a/jni/game/clothes/ClothesLoader.cpp b/jni/game/clothes/ClothesLoader.
      resource->memory=bytes.size()*4;return resource;
  }
 diff -ruN a/jni/game/clothes/ClothesLoader.h b/jni/game/clothes/ClothesLoader.h
---- a/jni/game/clothes/ClothesLoader.h	2026-10-08 04:53:29.939132500 +0000
-+++ b/jni/game/clothes/ClothesLoader.h	2026-10-08 04:53:29.940800702 +0000
+--- a/jni/game/clothes/ClothesLoader.h	2026-10-08 10:38:55.353935558 +0000
++++ b/jni/game/clothes/ClothesLoader.h	2026-10-08 10:38:55.348982219 +0000
 @@ -4,10 +4,12 @@
  #include "../character/CharacterCatalog.h"
  #include <map>
@@ -671,8 +821,8 @@ diff -ruN a/jni/game/clothes/ClothesLoader.h b/jni/game/clothes/ClothesLoader.h
      std::string root_;const CharacterCatalog& catalog_;
      RwTexDictionary* dictionary_=nullptr;
 diff -ruN a/jni/game/clothes/ClothesRenderer.cpp b/jni/game/clothes/ClothesRenderer.cpp
---- a/jni/game/clothes/ClothesRenderer.cpp	2026-10-08 04:53:29.947519476 +0000
-+++ b/jni/game/clothes/ClothesRenderer.cpp	2026-10-08 04:53:29.949217102 +0000
+--- a/jni/game/clothes/ClothesRenderer.cpp	2026-10-08 10:38:55.363886287 +0000
++++ b/jni/game/clothes/ClothesRenderer.cpp	2026-10-08 10:38:55.359177738 +0000
 @@ -2,7 +2,6 @@
  #include "../character/CharacterBody.h"
  #include "../character/CharacterHead.h"
@@ -697,8 +847,8 @@ diff -ruN a/jni/game/clothes/ClothesRenderer.cpp b/jni/game/clothes/ClothesRende
  }
  bool ClothesRenderer::Prepare(RpClump* carrier,const RwMatrix& root) {
 diff -ruN a/jni/game/clothes/ClothesStreaming.cpp b/jni/game/clothes/ClothesStreaming.cpp
---- a/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 04:53:29.953953389 +0000
-+++ b/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 04:53:29.959294481 +0000
+--- a/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 10:38:55.373014529 +0000
++++ b/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 10:38:55.368393985 +0000
 @@ -1,6 +1,6 @@
  #include "ClothesStreaming.h"
  #include <fstream>
@@ -717,8 +867,8 @@ diff -ruN a/jni/game/clothes/ClothesStreaming.cpp b/jni/game/clothes/ClothesStre
      }
      for(auto it=cache_.begin();it!=cache_.end();) {
 diff -ruN a/jni/game/hooks.cpp b/jni/game/hooks.cpp
---- a/jni/game/hooks.cpp	2026-10-08 04:53:29.966081113 +0000
-+++ b/jni/game/hooks.cpp	2026-10-08 04:53:29.967850815 +0000
+--- a/jni/game/hooks.cpp	2026-10-08 10:38:55.381822201 +0000
++++ b/jni/game/hooks.cpp	2026-10-08 10:38:55.377406242 +0000
 @@ -71,7 +71,12 @@
  void BuildGameFilePath(const char* r1, char* out, size_t cap)
  {

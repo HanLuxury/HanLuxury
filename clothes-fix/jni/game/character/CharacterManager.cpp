@@ -137,7 +137,8 @@ void CharacterManager::Tick() {
         auto* ped=Ped(local);
         if(!ped||ped->IsInVehicle()) StopPreview();
         else {const auto& p=ped->GetPosition();const float a=s.angle+ped->GetHeading();
-            CCamera::SetPosition(p.x+std::sin(a)*s.distance,p.y+std::cos(a)*s.distance,p.z+s.height+.1f,0,0,0);
+            // A ped with heading h faces (-sin h, cos h) (CPlaceable::GetHeading, CMatrix::SetRotateZOnly 0x537958).
+            CCamera::SetPosition(p.x-std::sin(a)*s.distance,p.y+std::cos(a)*s.distance,p.z+s.height+.1f,0,0,0);
             CCamera::LookAtPoint(p.x,p.y,p.z+s.height,2);
         }
     }
