@@ -36,7 +36,7 @@ TexturePtr FaceManager::Get(const PlayerAppearance& a,bool face) {
         } else if(a.tattoo&&v>.3f&&v<.55f&&u>.33f&&u<.56f&&((x+y*a.tattoo)%14)<4) shade=.3f;
         for(int c=0;c<3;++c) pixels[(size_t(y)*w+x)*4+c]=uint8_t(pixels[(size_t(y)*w+x)*4+c]*shade);
     }
-    // Same size as the atlas: a power-of-two padded raster would shift the UVs of a 104x104 skin.
+    // Not padded: CreateRgbaTexture resamples onto its power-of-two raster, so a 104x104 skin keeps its UVs.
     TexturePtr texture(CreateRgbaTexture(pixels.data(),w,h),TextureDeleter{});
     if(!texture) return {};
     std::snprintf(texture->name,sizeof(texture->name),"eg_overlay");

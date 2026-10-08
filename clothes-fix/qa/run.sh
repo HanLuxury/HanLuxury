@@ -12,6 +12,13 @@ ASAN_OPTIONS=detect_leaks=0 "$OUT/tex" "$TL/character/textures" "$TL/character.j
 echo "== catalog + appearance packet"
 $CXX -fsanitize=address,undefined -o "$OUT/cat" "$QA/cat_test.cpp" "$PKG/jni/game/character/CharacterCatalog.cpp" "$PKG/jni/game/character/CharacterTypes.cpp" "$PKG/jni/game/clothes/ClothesNetwork.cpp"
 ASAN_OPTIONS=detect_leaks=0 "$OUT/cat" "$TL"
+echo "== DFF validator + frame-name rewrite (ClothesLoader.cpp)"
+F="$PKG/jni/game/clothes/ClothesLoader.cpp"; A=$(grep -n "^namespace {" "$F" | head -1 | cut -d: -f1); B=$(grep -n "^ClothesLoader::~ClothesLoader" "$F" | cut -d: -f1)
+{ printf '#include <vector>\n#include <string>\n#include <cstdint>\n#include <cstring>\n#include <cstdio>\n#include <cmath>\n#include <algorithm>\n'
+  echo 'namespace Eagle::Character { struct ClothesLoader { static bool ValidateDff(const std::vector<uint8_t>&,std::string&); static bool ShortenFrameNames(std::vector<uint8_t>&,std::vector<std::string>&); };'
+  sed -n "${A},$((B-1))p" "$F"; echo '}'; cat "$QA/loader_test_main.cpp"; } > "$OUT/loader_test.cpp"
+g++ -std=c++20 -O1 -fsanitize=address,undefined -o "$OUT/loader" "$OUT/loader_test.cpp"
+ASAN_OPTIONS=detect_leaks=0 "$OUT/loader" $(find "$TL" -name '*.dff')
 echo "== retarget onto carriers 158/298"
 $CXX -o "$OUT/retarget" "$QA/retarget_test.cpp" "$PKG/jni/game/character/CharacterRetarget.cpp"
 mkdir -p "$OUT/skel"

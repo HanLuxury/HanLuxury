@@ -1,6 +1,6 @@
 diff -ruN a/README_INSTALL.md b/README_INSTALL.md
---- a/README_INSTALL.md	2026-10-08 00:08:53.559258200 +0000
-+++ b/README_INSTALL.md	2026-10-08 00:08:53.561305328 +0000
+--- a/README_INSTALL.md	2026-10-08 04:53:29.974682691 +0000
++++ b/README_INSTALL.md	2026-10-08 04:53:29.976612080 +0000
 @@ -40,6 +40,40 @@
  - Penulisan saldo, skin, dan gender yang relevan memakai epoch guard agar snapshot async lama tidak menimpa transaksi clothes.
  - Sistem ShadowHook yang sudah ada tetap menggunakan scope sesuai mode. Offset GTA dan binary libGTASA tidak diubah.
@@ -43,8 +43,8 @@ diff -ruN a/README_INSTALL.md b/README_INSTALL.md
  
  Statusnya **belum teridentifikasi secara pasti**. `libc.so (abort)` berarti proses dihentikan lewat abort, tetapi log singkat itu tidak memuat pesan penyebabnya. `libmultiplayer.so+0x236a74` perlu disimbolkan dengan **libmultiplayer.so persis dari APK yang mengalami crash**. LibGTASA saja tidak dapat memetakan alamat milik library client. Jangan memakai alamat build lama untuk binary hasil build baru ini.
 diff -ruN a/gamemodes/SERVER/player/character/character_system.inc b/gamemodes/SERVER/player/character/character_system.inc
---- a/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 00:08:53.569840928 +0000
-+++ b/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 00:08:53.571877706 +0000
+--- a/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 04:53:29.843687157 +0000
++++ b/gamemodes/SERVER/player/character/character_system.inc	2026-10-08 04:53:29.846451086 +0000
 @@ -252,6 +252,26 @@
      }
      return false;
@@ -122,7 +122,7 @@ diff -ruN a/gamemodes/SERVER/player/character/character_system.inc b/gamemodes/S
      {
 diff -ruN a/jni/game/character/CharacterLog.h b/jni/game/character/CharacterLog.h
 --- a/jni/game/character/CharacterLog.h	1970-01-01 00:00:00.000000000 +0000
-+++ b/jni/game/character/CharacterLog.h	2026-10-08 00:08:53.580482240 +0000
++++ b/jni/game/character/CharacterLog.h	2026-10-08 04:53:29.854364029 +0000
 @@ -0,0 +1,13 @@
 +#pragma once
 +#include <android/log.h>
@@ -138,8 +138,8 @@ diff -ruN a/jni/game/character/CharacterLog.h b/jni/game/character/CharacterLog.
 +}
 +}
 diff -ruN a/jni/game/character/CharacterManager.cpp b/jni/game/character/CharacterManager.cpp
---- a/jni/game/character/CharacterManager.cpp	2026-10-08 00:08:53.587923590 +0000
-+++ b/jni/game/character/CharacterManager.cpp	2026-10-08 00:08:53.590021920 +0000
+--- a/jni/game/character/CharacterManager.cpp	2026-10-08 04:53:29.860716713 +0000
++++ b/jni/game/character/CharacterManager.cpp	2026-10-08 04:53:29.862569500 +0000
 @@ -9,7 +9,7 @@
  #include "java_systems/cef/CEF.h"
  #include "json.hpp"
@@ -186,8 +186,8 @@ diff -ruN a/jni/game/character/CharacterManager.cpp b/jni/game/character/Charact
      }
      if(s.preview) {
 diff -ruN a/jni/game/character/CharacterPlayer.cpp b/jni/game/character/CharacterPlayer.cpp
---- a/jni/game/character/CharacterPlayer.cpp	2026-10-08 00:08:53.597630835 +0000
-+++ b/jni/game/character/CharacterPlayer.cpp	2026-10-08 00:08:53.599433176 +0000
+--- a/jni/game/character/CharacterPlayer.cpp	2026-10-08 04:53:29.869901980 +0000
++++ b/jni/game/character/CharacterPlayer.cpp	2026-10-08 04:53:29.871689091 +0000
 @@ -5,14 +5,14 @@
  #include "game/Entity/Ped/Ped.h"
  #include "ClothesSystem.h"
@@ -273,8 +273,8 @@ diff -ruN a/jni/game/character/CharacterPlayer.cpp b/jni/game/character/Characte
          return old.callback ? old.callback(atomic):AtomicDefaultRenderCallBack(atomic);
      return atomic;
 diff -ruN a/jni/game/character/CharacterPlayer.h b/jni/game/character/CharacterPlayer.h
---- a/jni/game/character/CharacterPlayer.h	2026-10-08 00:08:53.606583579 +0000
-+++ b/jni/game/character/CharacterPlayer.h	2026-10-08 00:08:53.608704644 +0000
+--- a/jni/game/character/CharacterPlayer.h	2026-10-08 04:53:29.880154703 +0000
++++ b/jni/game/character/CharacterPlayer.h	2026-10-08 04:53:29.882302706 +0000
 @@ -5,7 +5,7 @@
  namespace Eagle::Character {
  class CharacterPlayer {
@@ -300,8 +300,8 @@ diff -ruN a/jni/game/character/CharacterPlayer.h b/jni/game/character/CharacterP
      std::vector<std::unique_ptr<ClothesRenderer>> parts_;
      TexturePtr face_,body_;uint16_t hidden_=0;
 diff -ruN a/jni/game/character/CharacterRenderWare.cpp b/jni/game/character/CharacterRenderWare.cpp
---- a/jni/game/character/CharacterRenderWare.cpp	2026-10-08 00:08:53.615940971 +0000
-+++ b/jni/game/character/CharacterRenderWare.cpp	2026-10-08 00:08:53.617924324 +0000
+--- a/jni/game/character/CharacterRenderWare.cpp	2026-10-08 04:53:29.889308281 +0000
++++ b/jni/game/character/CharacterRenderWare.cpp	2026-10-08 04:53:29.891026328 +0000
 @@ -1,6 +1,6 @@
  #include "CharacterRenderWare.h"
  #include <dlfcn.h>
@@ -319,17 +319,31 @@ diff -ruN a/jni/game/character/CharacterRenderWare.cpp b/jni/game/character/Char
      RW_SYMBOL(readClump,"_Z17RpClumpStreamReadP8RwStream")
      RW_SYMBOL(cloneClump,"_Z12RpClumpCloneP7RpClump")
      RW_SYMBOL(findChunk,"_Z17RwStreamFindChunkP8RwStreamjPjS1_")
+diff -ruN a/jni/game/character/CharacterRenderWare.h b/jni/game/character/CharacterRenderWare.h
+--- a/jni/game/character/CharacterRenderWare.h	2026-10-08 04:53:29.897813968 +0000
++++ b/jni/game/character/CharacterRenderWare.h	2026-10-08 04:53:29.900006637 +0000
+@@ -20,7 +20,7 @@
+     RwBool (*destroyDictionary)(RwTexDictionary*)=nullptr;
+     RwTexDictionary* (*getDictionary)()=nullptr;
+     RwTexDictionary* (*setDictionary)(RwTexDictionary*)=nullptr;
+-    RwTexDictionary* (*addTexture)(RwTexDictionary*,RwTexture*)=nullptr;
++    RwTexture* (*addTexture)(RwTexDictionary*,RwTexture*)=nullptr; // returns the texture (0x274120)
+     RpMaterial* (*setTexture)(RpMaterial*,RwTexture*)=nullptr;
+     bool Resolve();
+     static RenderWareApi& Get();
 diff -ruN a/jni/game/character/CharacterTexture.cpp b/jni/game/character/CharacterTexture.cpp
 --- a/jni/game/character/CharacterTexture.cpp	1970-01-01 00:00:00.000000000 +0000
-+++ b/jni/game/character/CharacterTexture.cpp	2026-10-08 00:08:53.625333464 +0000
-@@ -0,0 +1,55 @@
++++ b/jni/game/character/CharacterTexture.cpp	2026-10-08 04:53:29.908942080 +0000
+@@ -0,0 +1,69 @@
 +#include "CharacterTexture.h"
 +#include "../../vendor/imgui/stb_image.h" // implementation compiled in main.cpp
++#include <algorithm>
 +#include <cstring>
 +#include <fstream>
 +namespace Eagle::Character {
 +namespace {
 +constexpr int kMaxRaster=4096;
++int PowerOfTwo(int v) {int p=1;while(p<v) p<<=1;return p;}
 +}
 +bool ReadPng(const std::string& path,int maxSize,std::vector<uint8_t>& rgba,int& width,int& height,std::string& error) {
 +    rgba.clear();width=height=0;
@@ -354,7 +368,9 @@ diff -ruN a/jni/game/character/CharacterTexture.cpp b/jni/game/character/Charact
 +RwTexture* CreateRgbaTexture(const uint8_t* rgba,int width,int height) {
 +    if(!rgba||width<1||height<1||width>kMaxRaster||height>kMaxRaster) return nullptr;
 +    if(!RwRasterCreate||!RwRasterLock||!RwRasterUnlock||!RwRasterDestroy) return nullptr;
-+    RwRaster* raster=RwRasterCreate(width,height,32,int(rwRASTERTYPETEXTURE)|int(rwRASTERFORMAT8888));
++    // Power-of-two raster: RwRasterUnlock gives every new texture GL_REPEAT (0x23f870) and the texture's
++    // clamp bits are not applied, and GLES2 without NPOT support samples a repeated NPOT texture as black.
++    RwRaster* raster=RwRasterCreate(PowerOfTwo(width),PowerOfTwo(height),32,int(rwRASTERTYPETEXTURE)|int(rwRASTERFORMAT8888));
 +    if(!raster) return nullptr;
 +    bool copied=false;
 +    if(RwUInt8* pixels=RwRasterLock(raster,0,rwRASTERLOCKWRITE)) {
@@ -364,10 +380,20 @@ diff -ruN a/jni/game/character/CharacterTexture.cpp b/jni/game/character/Charact
 +            for(int y=0;y<h;++y) {
 +                uint8_t* row=pixels+size_t(y)*size_t(raster->stride);
 +                if(w==width&&h==height) {std::memcpy(row,rgba+size_t(y)*size_t(width)*4,size_t(width)*4);continue;}
-+                // A driver that rounds the size up: stretch the image over the whole raster, so UV 0..1
-+                // still cover all of it. Padding would move every UV of the model (384x512, 512x509, 104x104).
-+                const uint8_t* source=rgba+size_t(y*height/h)*size_t(width)*4;
-+                for(int x=0;x<w;++x) std::memcpy(row+size_t(x)*4,source+size_t(x*width/w)*4,4);
++                // Bilinear resample over the whole raster, so UV 0..1 still cover all of the image.
++                // Padding would move every UV of the model (384x512, 512x509, 104x104 in TESTLIT).
++                const float sy=std::clamp((y+.5f)*height/h-.5f,0.f,float(height-1));
++                const int y0=int(sy),y1=std::min(y0+1,height-1);const float ty=sy-y0;
++                for(int x=0;x<w;++x) {
++                    const float sx=std::clamp((x+.5f)*width/w-.5f,0.f,float(width-1));
++                    const int x0=int(sx),x1=std::min(x0+1,width-1);const float tx=sx-x0;
++                    const uint8_t* p00=rgba+(size_t(y0)*width+x0)*4;const uint8_t* p01=rgba+(size_t(y0)*width+x1)*4;
++                    const uint8_t* p10=rgba+(size_t(y1)*width+x0)*4;const uint8_t* p11=rgba+(size_t(y1)*width+x1)*4;
++                    for(int c=0;c<4;++c) {
++                        const float top=p00[c]+(p01[c]-p00[c])*tx,bottom=p10[c]+(p11[c]-p10[c])*tx;
++                        row[size_t(x)*4+c]=uint8_t(top+(bottom-top)*ty+.5f);
++                    }
++                }
 +            }
 +            copied=true;
 +        }
@@ -380,7 +406,7 @@ diff -ruN a/jni/game/character/CharacterTexture.cpp b/jni/game/character/Charact
 +}
 diff -ruN a/jni/game/character/CharacterTexture.h b/jni/game/character/CharacterTexture.h
 --- a/jni/game/character/CharacterTexture.h	1970-01-01 00:00:00.000000000 +0000
-+++ b/jni/game/character/CharacterTexture.h	2026-10-08 00:08:53.632712474 +0000
++++ b/jni/game/character/CharacterTexture.h	2026-10-08 04:53:29.915620127 +0000
 @@ -0,0 +1,14 @@
 +#pragma once
 +#include "CharacterRenderWare.h"
@@ -397,8 +423,8 @@ diff -ruN a/jni/game/character/CharacterTexture.h b/jni/game/character/Character
 +RwTexture* CreateRgbaTexture(const uint8_t* rgba,int width,int height);
 +}
 diff -ruN a/jni/game/character/FaceManager.cpp b/jni/game/character/FaceManager.cpp
---- a/jni/game/character/FaceManager.cpp	2026-10-08 00:08:53.639490386 +0000
-+++ b/jni/game/character/FaceManager.cpp	2026-10-08 00:08:53.641409852 +0000
+--- a/jni/game/character/FaceManager.cpp	2026-10-08 04:53:29.921891352 +0000
++++ b/jni/game/character/FaceManager.cpp	2026-10-08 04:53:29.923945769 +0000
 @@ -1,5 +1,6 @@
  #include "FaceManager.h"
 -#include "util/TextureUploadManager.h"
@@ -431,25 +457,131 @@ diff -ruN a/jni/game/character/FaceManager.cpp b/jni/game/character/FaceManager.
          for(int c=0;c<3;++c) pixels[(size_t(y)*w+x)*4+c]=uint8_t(pixels[(size_t(y)*w+x)*4+c]*shade);
      }
 -    TexturePtr texture(TextureUploadManager::CreateRwTextureFromBytes(pixels.data(),w,h,true),TextureDeleter{});
-+    // Same size as the atlas: a power-of-two padded raster would shift the UVs of a 104x104 skin.
++    // Not padded: CreateRgbaTexture resamples onto its power-of-two raster, so a 104x104 skin keeps its UVs.
 +    TexturePtr texture(CreateRgbaTexture(pixels.data(),w,h),TextureDeleter{});
      if(!texture) return {};
      std::snprintf(texture->name,sizeof(texture->name),"eg_overlay");
      texture->filterAddressing=rwFILTERLINEAR|(rwTEXTUREADDRESSCLAMP<<8)|(rwTEXTUREADDRESSCLAMP<<12);
 diff -ruN a/jni/game/clothes/ClothesLoader.cpp b/jni/game/clothes/ClothesLoader.cpp
---- a/jni/game/clothes/ClothesLoader.cpp	2026-10-08 00:08:53.648751854 +0000
-+++ b/jni/game/clothes/ClothesLoader.cpp	2026-10-08 00:08:53.650416819 +0000
-@@ -1,7 +1,8 @@
+--- a/jni/game/clothes/ClothesLoader.cpp	2026-10-08 04:53:29.931053367 +0000
++++ b/jni/game/clothes/ClothesLoader.cpp	2026-10-08 04:53:29.932758377 +0000
+@@ -1,7 +1,9 @@
  #include "ClothesLoader.h"
 +#include "../character/CharacterTexture.h"
 +#include "../character/CharacterLog.h"
  #include <cstring>
  #include <cstdio>
 -#include <fstream>
++#include <cstdlib>
  #include <cmath>
  #include <algorithm>
  namespace Eagle::Character {
-@@ -107,22 +108,14 @@
+@@ -17,7 +19,7 @@
+     }return at==size;
+ }
+ const Chunk* Find(const std::vector<Chunk>& list,uint32_t type) {for(const auto& c:list) if(c.type==type) return &c;return nullptr;}
+-bool Geometry(const Chunk& geometry) {
++bool Geometry(const Chunk& geometry,const uint8_t*& bind,size_t& bindSize) {
+     std::vector<Chunk> children;if(!Children(geometry.data,geometry.size,children)) return false;
+     const auto* st=Find(children,1);const auto* ext=Find(children,3);if(!st||st->size<16||!ext) return false;
+     const auto* ml=Find(children,8);std::vector<Chunk> materials,material,texture;
+@@ -26,7 +28,11 @@
+     if(!mc||mc->size!=8||U32(mc->data)!=1||U32(mc->data+4)!=0xffffffffu||!mat||!Children(mat->data,mat->size,material)) return false;
+     const auto* ms=Find(material,1);const auto* tx=Find(material,6);
+     if(!ms||ms->size!=28||!tx||!Children(tx->data,tx->size,texture)) return false;
+-    for(const auto& t:texture) if(t.type==2&&(t.size<1||t.size>32)) return false;
++    // RwTextureStreamRead (0x26c670) copies a whole name chunk into a 128-byte stack buffer.
++    for(const auto& t:texture) {
++        if(t.type==0x13) return false;
++        if(t.type==2&&(t.size<1||t.size>32||!std::memchr(t.data,0,t.size))) return false;
++    }
+     uint32_t flags=U32(st->data),tri=U32(st->data+4),verts=U32(st->data+8),morph=U32(st->data+12);
+     if(flags&0x01000000u||!verts||verts>40000||!tri||tri>60000||morph!=1) return false;
+     unsigned uv=(flags>>16)&255u;uv=uv ? uv:((flags&128u) ? 2:((flags&4u) ? 1:0));if(uv>2) return false;
+@@ -45,9 +51,14 @@
+     for(size_t i=20;i<bm->size;i+=4) if(U32(bm->data+i)>=verts) return false;
+     const auto* skin=Find(extensions,0x116);if(!skin||skin->size<4) return false;
+     const uint8_t bones=skin->data[0],used=skin->data[1];
+-    if(!bones||bones>64||!used||used>bones||skin->data[2]>4) return false;
++    // maxWeights 0 makes SkinGeometryRead (0x25da5c) parse the old layout, not the one checked here.
++    if(!bones||bones>64||!used||used>bones||!skin->data[2]||skin->data[2]>4) return false;
+     size_t indices=4+used,weights=indices+size_t(verts)*4,matrices=weights+size_t(verts)*16;
+     if(matrices+size_t(bones)*64+12!=skin->size) return false;
++    // Split data: with meshes or RLE runs the native reader goes past these 12 bytes (0x25b95c).
++    const size_t split=matrices+size_t(bones)*64;
++    if(U32(skin->data+split+4)||U32(skin->data+split+8)) return false;
++    bind=skin->data+matrices;bindSize=size_t(bones)*64;
+     for(size_t i=0;i<used;++i) if(skin->data[4+i]>=bones) return false;
+     for(uint32_t v=0;v<verts;++v) {
+         float total=0;
+@@ -81,10 +92,12 @@
+         for(const auto& plugin:plugins) {
+             if(plugin.type==0x253f2fe) {if(plugin.size>32) return fail("frame name length");}
+             else if(plugin.type==0x11e) {
+-                if(plugin.size<12) return fail("HAnim header");
++                if(plugin.size<12||U32(plugin.data)!=0x100) return fail("HAnim header");
+                 const auto count=U32(plugin.data+8);
+                 if(!count) {if(plugin.size!=12) return fail("HAnim leaf");continue;}
+                 if(count>64||plugin.size!=20+size_t(count)*12||++hierarchies>1) return fail("HAnim nodes");
++                // HAnimCopy (0x254e0c) skips a sub-hierarchy; HAnimRead sizes the interpolator from keyFrameSize.
++                if((U32(plugin.data+12)&3)!=0||U32(plugin.data+16)!=36) return fail("HAnim flags/keyframe size");
+                 bool used[64]{};std::vector<uint32_t> ids;
+                 for(uint32_t j=0;j<count;++j) {
+                     auto id=U32(plugin.data+20+j*12),index=U32(plugin.data+24+j*12);
+@@ -95,34 +108,65 @@
+         }
+     }
+     if(extensions!=n||hierarchies!=1) return fail("frame hierarchy count");
+-    unsigned geometryCount=0,atomicCount=0;
+-    for(const auto& geometry:geometries) if(geometry.type==15) {if(!Geometry(geometry)) return fail("unsupported geometry/skin data");++geometryCount;}
++    unsigned geometryCount=0,atomicCount=0;const uint8_t* bind=nullptr;size_t bindSize=0;
++    for(const auto& geometry:geometries) if(geometry.type==15) {
++        const uint8_t* own=nullptr;size_t ownSize=0;
++        if(!Geometry(geometry,own,ownSize)) return fail("unsupported geometry/skin data");
++        // One private hierarchy skins every part, and the skin pipeline caches its matrices per hierarchy
++        // (openglSkinAllInOneAtomicInstanceCB 0x25c5c8): all parts need the same bind pose and frame.
++        if(bind&&(ownSize!=bindSize||std::memcmp(own,bind,bindSize))) return fail("parts with different bind matrices");
++        bind=own;bindSize=ownSize;++geometryCount;
++    }
++    int64_t atomicFrame=-1;
+     for(const auto& atomic:clump) if(atomic.type==20) {
+         std::vector<Chunk> c;if(!Children(atomic.data,atomic.size,c)) return fail("atomic chunks");
+         const auto* a=Find(c,1);if(!a||a->size!=16||U32(a->data)>=n||U32(a->data+4)>=geometryCount) return fail("atomic reference");++atomicCount;
++        const uint32_t fi=U32(a->data);
++        if(atomicFrame>=0&&fi!=uint32_t(atomicFrame)&&std::memcmp(f->data+4+fi*56,f->data+4+atomicFrame*56,52)) return fail("parts on different frames");
++        atomicFrame=fi;
+     }
+     return geometryCount&&geometryCount<=32&&atomicCount==geometryCount&&U32(header->data)==atomicCount ? true:fail("atomic count");
+ }
++bool ClothesLoader::ShortenFrameNames(std::vector<uint8_t>& bytes,std::vector<std::string>& names) {
++    // The game keeps a frame name in a 24-byte slot: NodeNameStreamRead (0x574128) writes the whole chunk
++    // plus a NUL with no bound, and NodeNameCopy (0x5740f0) copies 23 bytes on clone. A longer name is
++    // recorded here and the game gets "#<frame>" instead. The rest of the chunk becomes a chunk with an
++    // unregistered id, which _rwPluginRegistryReadDataChunks (0x280f84) skips, so no size changes.
++    constexpr size_t kGameName=22;constexpr uint32_t kSkipped=0x7ea61e00u;
++    std::vector<Chunk> root,clump,frames;
++    if(!Children(bytes.data(),bytes.size(),root)||root.size()!=1||!Children(root[0].data,root[0].size,clump)) return false;
++    const auto* fl=Find(clump,14);if(!fl||!Children(fl->data,fl->size,frames)) return false;
++    names.clear();uint32_t index=0;
++    for(const auto& frame:frames) if(frame.type==3) {
++        std::vector<Chunk> plugins;if(!Children(frame.data,frame.size,plugins)) return false;
++        names.emplace_back();
++        for(const auto& plugin:plugins) if(plugin.type==0x253f2fe) {
++            names.back().assign(reinterpret_cast<const char*>(plugin.data),strnlen(reinterpret_cast<const char*>(plugin.data),plugin.size));
++            if(plugin.size<=kGameName) continue;
++            char alias[8];const size_t length=size_t(std::snprintf(alias,sizeof(alias),"#%u",index));
++            if(plugin.size<length+12) return false;
++            uint8_t* at=bytes.data()+(plugin.data-bytes.data());
++            const uint32_t version=U32(at-4),rest=uint32_t(plugin.size-length-12);
++            auto put=[](uint8_t* p,uint32_t v) {for(int i=0;i<4;++i) p[i]=uint8_t(v>>(8*i));};
++            put(at-8,uint32_t(length));std::memcpy(at,alias,length);
++            put(at+length,kSkipped);put(at+length+4,rest);put(at+length+8,version);
++        }
++        ++index;
++    }
++    return true;
++}
+ ClothesLoader::~ClothesLoader() {if(dictionary_) RenderWareApi::Get().destroyDictionary(dictionary_);}
  TexturePtr ClothesLoader::Texture(const std::string& name) {
      auto old=textures_.find(name);if(old!=textures_.end()) if(auto t=old->second.lock()) return t;
      const TextureDefinition* definition=nullptr;for(const auto& d:catalog_.Textures()) if(d.name==name) {definition=&d;break;}
@@ -480,9 +612,93 @@ diff -ruN a/jni/game/clothes/ClothesLoader.cpp b/jni/game/clothes/ClothesLoader.
      std::snprintf(texture->name,sizeof(texture->name),"%s",name.c_str());
      texture->filterAddressing=rwFILTERLINEAR|(rwTEXTUREADDRESSCLAMP<<8)|(rwTEXTUREADDRESSCLAMP<<12);
      auto& rw=RenderWareApi::Get();if(!dictionary_) dictionary_=rw.createDictionary();if(!dictionary_) return {};
+@@ -130,12 +174,14 @@
+ }
+ std::shared_ptr<ClothesAsset> ClothesLoader::Load(const AssetDefinition& d,const std::vector<uint8_t>& bytes,std::string& error) {
+     if(!ValidateDff(bytes,error)||!RenderWareApi::Get().Resolve()) return {};
++    std::vector<uint8_t> stored(bytes);std::vector<std::string> names;
++    if(!ShortenFrameNames(stored,names)) {error="frame names";return {};}
+     auto resource=std::make_shared<ClothesAsset>();
+     for(const auto& name:d.textures) {auto texture=Texture(name);if(!texture) {error="texture failed: "+name;return {};}resource->textures.push_back(std::move(texture));}
+     auto& rw=RenderWareApi::Get();
+     struct DictionaryGuard {RenderWareApi& rw;RwTexDictionary* old;~DictionaryGuard(){rw.setDictionary(old);}} dictionaryGuard{rw,rw.getDictionary()};
+     rw.setDictionary(dictionary_);
+-    RwMemory memory{const_cast<uint8_t*>(bytes.data()),RwUInt32(bytes.size())};
++    RwMemory memory{stored.data(),RwUInt32(stored.size())};
+     auto* stream=RwStreamOpen(rwSTREAMMEMORY,rwSTREAMREAD,&memory);
+     if(!stream) {error="memory stream failed";return {};}
+     if(rw.findChunk(stream,16,nullptr,nullptr)) resource->clump.reset(rw.readClump(stream));
+@@ -144,10 +190,14 @@
+     std::vector<RpAtomic*> atomics;if(!CollectAtomics(resource->clump.get(),atomics)) {error="atomic budget";return {};}
+     for(auto* atomic:atomics) {
+         auto* frame=RpAtomicGetFrame(atomic);auto* geometry=RpAtomicGetGeometry(atomic);
+-        auto* tag=frame ? rw.frameName(frame):nullptr;unsigned region=0;char textureName[32]{};
+-        if(!tag||std::sscanf(tag,"EAGLE_r%u_%31s",&region,textureName)!=2||region>1023||!geometry||geometry->matList.numMaterials!=1) {error="asset must use Eagle frame/material tags";return {};}
++        const char* name=frame ? rw.frameName(frame):nullptr;std::string tag=name ? name:"";
++        if(tag.size()>1&&tag[0]=='#') {const unsigned long k=std::strtoul(tag.c_str()+1,nullptr,10);tag=k<names.size() ? names[k]:"";}
++        unsigned region=0;char textureName[32]{};
++        if(std::sscanf(tag.c_str(),"EAGLE_r%u_%31s",&region,textureName)!=2||region>1023||!geometry||geometry->matList.numMaterials!=1) {error="asset must use Eagle frame/material tags";return {};}
+         auto texture=Texture(textureName);if(!texture) {error="tagged material texture missing";return {};}
+         rw.setTexture(geometry->matList.materials[0],texture.get());
++        // Clones share this geometry (RpAtomicClone 0x2ba898 adds a reference), so parts are found by it.
++        if(!resource->parts.emplace(geometry,AssetPart{uint16_t(region),textureName}).second) {error="atomics share a geometry";return {};}
+     }
+     resource->memory=bytes.size()*4;return resource;
+ }
+diff -ruN a/jni/game/clothes/ClothesLoader.h b/jni/game/clothes/ClothesLoader.h
+--- a/jni/game/clothes/ClothesLoader.h	2026-10-08 04:53:29.939132500 +0000
++++ b/jni/game/clothes/ClothesLoader.h	2026-10-08 04:53:29.940800702 +0000
+@@ -4,10 +4,12 @@
+ #include "../character/CharacterCatalog.h"
+ #include <map>
+ namespace Eagle::Character {
++struct AssetPart {uint16_t region=0;std::string material;};
+ struct ClothesAsset {
+     // Clump is destroyed before texture leases; clones share its geometry.
+     std::vector<TexturePtr> textures;
+     ClumpPtr clump;
++    std::map<const RpGeometry*,AssetPart> parts; // frame tag of each part, by shared geometry
+     size_t memory=0;
+ };
+ class ClothesLoader {
+@@ -17,6 +19,8 @@
+     std::shared_ptr<ClothesAsset> Load(const AssetDefinition& definition,const std::vector<uint8_t>& bytes,std::string& error);
+     TexturePtr Texture(const std::string& name);
+     static bool ValidateDff(const std::vector<uint8_t>& bytes,std::string& error);
++    // Validated DFF only: frame names longer than the game keeps become "#<frame>"; full names in `names`.
++    static bool ShortenFrameNames(std::vector<uint8_t>& bytes,std::vector<std::string>& names);
+ private:
+     std::string root_;const CharacterCatalog& catalog_;
+     RwTexDictionary* dictionary_=nullptr;
+diff -ruN a/jni/game/clothes/ClothesRenderer.cpp b/jni/game/clothes/ClothesRenderer.cpp
+--- a/jni/game/clothes/ClothesRenderer.cpp	2026-10-08 04:53:29.947519476 +0000
++++ b/jni/game/clothes/ClothesRenderer.cpp	2026-10-08 04:53:29.949217102 +0000
+@@ -2,7 +2,6 @@
+ #include "../character/CharacterBody.h"
+ #include "../character/CharacterHead.h"
+ #include "../character/CharacterHair.h"
+-#include <cstdio>
+ namespace Eagle::Character {
+ ClothesRenderer::ClothesRenderer(std::shared_ptr<AssetTicket> ticket,Colour tint):ticket_(std::move(ticket)),tint_(tint) {}
+ bool ClothesRenderer::Initialise() {
+@@ -11,10 +10,11 @@
+     clump_.reset(rw.cloneClump(ticket_->asset->clump.get()));
+     std::vector<RpAtomic*> atomics;
+     if(!clump_||!CollectAtomics(clump_.get(),atomics)||!skeleton_.Initialise(clump_.get(),atomics)) return false;
++    // By geometry, not by the clone's frame name: NodeNameCopy keeps only 23 bytes of it.
++    const auto& tags=ticket_->asset->parts;
+     for(auto* atomic:atomics) {
+-        char material[32]{};unsigned region=0;const char* tag=rw.frameName(RpAtomicGetFrame(atomic));
+-        if(!tag||std::sscanf(tag,"EAGLE_r%u_%31s",&region,material)!=2||region>1023) return false;
+-        parts_.push_back({atomic,uint16_t(region),material});
++        auto tag=tags.find(RpAtomicGetGeometry(atomic));if(tag==tags.end()) return false;
++        parts_.push_back({atomic,tag->second.region,tag->second.material});
+     }return true;
+ }
+ bool ClothesRenderer::Prepare(RpClump* carrier,const RwMatrix& root) {
 diff -ruN a/jni/game/clothes/ClothesStreaming.cpp b/jni/game/clothes/ClothesStreaming.cpp
---- a/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 00:08:53.657411152 +0000
-+++ b/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 00:08:53.659230179 +0000
+--- a/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 04:53:29.953953389 +0000
++++ b/jni/game/clothes/ClothesStreaming.cpp	2026-10-08 04:53:29.959294481 +0000
 @@ -1,6 +1,6 @@
  #include "ClothesStreaming.h"
  #include <fstream>
@@ -501,8 +717,8 @@ diff -ruN a/jni/game/clothes/ClothesStreaming.cpp b/jni/game/clothes/ClothesStre
      }
      for(auto it=cache_.begin();it!=cache_.end();) {
 diff -ruN a/jni/game/hooks.cpp b/jni/game/hooks.cpp
---- a/jni/game/hooks.cpp	2026-10-08 00:08:53.666804052 +0000
-+++ b/jni/game/hooks.cpp	2026-10-08 00:08:53.669294489 +0000
+--- a/jni/game/hooks.cpp	2026-10-08 04:53:29.966081113 +0000
++++ b/jni/game/hooks.cpp	2026-10-08 04:53:29.967850815 +0000
 @@ -71,7 +71,12 @@
  void BuildGameFilePath(const char* r1, char* out, size_t cap)
  {

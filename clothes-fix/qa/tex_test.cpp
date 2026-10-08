@@ -36,7 +36,9 @@ int main(int argc,char**argv){
       auto px=[&](int x,int y){return r->cpPixels+size_t(y)*r->stride+size_t(x)*4;};
       assert(!memcmp(px(0,0),&rgba[0],4));
       assert(!memcmp(px(r->width-1,r->height-1),&rgba[(size_t(h-1)*w+(w-1))*4],4));
-      if(m!=RoundPot) for(int y=0;y<h;y+=7) assert(!memcmp(px(0,y),&rgba[size_t(y)*w*4],size_t(w)*4));
+      // every raster is a power of two now; a power-of-two image is copied byte for byte
+      assert((r->width&(r->width-1))==0&&(r->height&(r->height-1))==0&&r->width>=w&&r->height>=h);
+      if(r->width==w&&r->height==h) for(int y=0;y<h;y+=7) assert(!memcmp(px(0,y),&rgba[size_t(y)*w*4],size_t(w)*4));
       FreeTexture(t);
     }
     ++ok; printf("ok %-32s %dx%d\n",n.c_str(),w,h);
