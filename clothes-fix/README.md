@@ -1,39 +1,38 @@
-# Fix clothes system EAGLE (ped 158/298)
+# Fix clothes system: tekstur karakter "file not found"
 
-Perbaikan untuk paket `RPEAGLE_clothes_bug.zip`: client (JNI), gamemode, dan catatan instalasi. CEF, SQL, dan TESTLIT tidak perlu diubah; semuanya sudah dicek cocok.
+Perbaikan untuk paket `RPEAGLE_clothes_bug.zip` (EAGLE clothes revision 3, ped 158/298).
 
-## Masalah yang diperbaiki
+Gejala di log:
 
-| Masalah | Akibat di game | File |
-| --- | --- | --- |
-| PNG karakter dibaca lewat `RtPNGImageRead` → `NvFOpen`, yang menaruh root storage dua kali (`TESTLIT//storage/emulated/0/TESTLIT/...`). | Semua tekstur gagal, karakter tidak pernah siap, pakaian tidak tampil. | `jni/game/character/CharacterTexture.*` (baru), `ClothesLoader.cpp`, `FaceManager.cpp`, `hooks.cpp` |
-| Overlay wajah/kulit di-pad ke power-of-two. | Overlay skin 104x104 bergeser. | `FaceManager.cpp` |
-| Log `EagleCharacter` hanya ke logcat; banyak titik gagal tanpa pesan. | Error tidak terlihat di log client. | `CharacterLog.h` (baru), `CharacterPlayer.*`, `CharacterManager.cpp`, `CharacterRenderWare.cpp`, `ClothesStreaming.cpp` |
-| Setiap penolakan transaksi (uang kurang, harga beda, dll.) membuat pemain di-kick. | Beli pakaian gagal = keluar dari server. | `gamemodes/.../character_system.inc` |
-| Save/buy dibuang tanpa balasan (belum berjalan kaki, jeda 500 ms, tattoo/freckles di luar creator). | Menu macet di "Menyimpan…". | `gamemodes/.../character_system.inc` |
+```
+NVFOpen hook | Error: file not found (/storage/emulated/0/TESTLIT//storage/emulated/0/TESTLIT/character/textures/user_eg_skin_m.png)
+```
+
+Penyebab: `ClothesLoader` dan `FaceManager` membaca PNG dengan `RtPNGImageRead(<path lengkap>)`. Fungsi itu membuka file lewat `NvFOpen` milik game, dan `BuildGameFilePath` selalu menaruh root storage di depan nama file, sehingga root tertulis dua kali. Akibatnya semua tekstur dan semua aset modular (body, face, hair, top, pants, shoes) gagal, karakter tidak pernah siap, dan client mencoba ulang tiap 6 detik.
+
+## Isi folder
+
+| File | Perubahan |
+| --- | --- |
+| `jni/game/character/CharacterTexture.h/.cpp` | Baru. PNG dibaca langsung dengan stb_image dari path lengkap, lalu dibuat raster 32-bit seukuran gambar. |
+| `jni/game/clothes/ClothesLoader.cpp` | Memakai loader baru. Error dicatat ke log `EagleCharacter` beserta path. |
+| `jni/game/character/FaceManager.cpp` | Memakai loader baru. Overlay tidak di-pad ke power-of-two, karena padding menggeser UV skin 104x104. |
+| `jni/game/hooks.cpp` | `BuildGameFilePath` tidak menambahkan root storage pada path yang sudah diawali root itu. |
+| `clothes_texture_path_fix.patch` | Semua perubahan di atas (juga README_INSTALL.md), untuk `patch -p1` di root paket. |
 
 ## Pasang
 
-1. Timpa file `jni/` ke project Android Anda, lalu build ulang `libmultiplayer.so`. File baru ikut ter-build otomatis, karena CMake dan ndk-build memakai glob.
-2. Timpa `gamemodes/SERVER/player/character/character_system.inc`, compile ulang `Main.pwn`, lalu restart server.
-3. Atau dari root paket asli jalankan `patch -p1 < clothes_fix.patch`. Patch ini juga memperbarui `README_INSTALL.md`.
+Timpa file di atas ke folder `jni/` project Anda (file baru ikut ter-build otomatis, karena CMake dan ndk-build memakai glob), atau dari root paket jalankan:
 
-## Cek di game
+```sh
+patch -p1 < clothes_texture_path_fix.patch
+```
 
-- Log client harus berisi `EagleCharacter: catalog ready revision 3 at ...`, lalu `EagleCharacter: player <id>: <n> parts on ped model 158` (atau 298).
-- Baris `TESTLIT//storage/...` tidak boleh muncul lagi.
-- Jika pakaian tetap tidak tampil, baris `EagleCharacter` menyebut alasannya. Jika FC, kirim baris itu dan `adb logcat -b crash -d`.
+Lalu build ulang `libmultiplayer.so`. Gamemode, CEF, SQL, dan TESTLIT tidak berubah.
 
-## Tes host
+## Yang sudah dan belum diuji
 
-`bash qa/run.sh <root paket hasil fix> <folder TESTLIT>` menjalankan:
+- Host: 30 PNG TESTLIT terbaca dan byte RGBA-nya identik dengan Pillow. Pembuatan raster ukuran persis, ukuran dibulatkan, dan stride lebar bersih di AddressSanitizer/UBSan tanpa raster bocor. 324 DFF lolos `ValidateDff` dan tag frame `EAGLE_r*` cocok dengan tekstur katalog.
+- Belum: build NDK ARM64 dan uji di HP.
 
-- Loader PNG (ASan/UBSan) pada 30 tekstur.
-- Katalog client dan paket appearance dari server.
-- Retarget 324 DFF ke `cwmofr` dan `cat`.
-- Cek silang katalog client, server, dan SQL.
-- Alur CEF di Chromium (butuh node + playwright).
-
-`qa/ec_ui_check.pwn` adalah stub untuk cek compile fungsi Pawn yang diubah (pawncc 3.10.10).
-
-Belum diuji: build NDK, compile gamemode lengkap, dan uji di HP.
+Setelah build baru, baris `TESTLIT//storage/...` tidak boleh muncul lagi. Jika masih FC, ambil `adb logcat -b crash -d` dan baris log `EagleCharacter`.
